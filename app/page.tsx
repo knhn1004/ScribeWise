@@ -121,7 +121,7 @@ export default function LandingPage() {
                 </CardHeader>
                 <CardContent>
                   <p className="text-sm text-gray-500 dark:text-gray-400">
-                    Our spaced repetition system ensures you review concepts right before you're about to forget them.
+                    Our spaced repetition system ensures you review concepts right before you&apos;re about to forget them.
                   </p>
                 </CardContent>
               </Card>
@@ -212,8 +212,8 @@ export default function LandingPage() {
                 </CardHeader>
                 <CardContent>
                   <p className="text-sm text-gray-500 dark:text-gray-400">
-                    "ScribeWise has been a game-changer for my medical studies. The AI tutor helps me understand complex
-                    concepts, and the flashcards make memorization so much easier."
+                    &quot;ScribeWise has been a game-changer for my medical studies. The AI tutor helps me understand complex
+                    concepts, and the flashcards make memorization so much easier.&quot;
                   </p>
                 </CardContent>
               </Card>
@@ -229,8 +229,8 @@ export default function LandingPage() {
                 </CardHeader>
                 <CardContent>
                   <p className="text-sm text-gray-500 dark:text-gray-400">
-                    "I've tried many study apps, but ScribeWise is on another level. The AI actually understands my
-                    programming questions and gives helpful explanations."
+                    &quot;I&apos;ve tried many study apps, but ScribeWise is on another level. The AI actually understands my
+                    programming questions and gives helpful explanations.&quot;
                   </p>
                 </CardContent>
               </Card>
@@ -246,8 +246,8 @@ export default function LandingPage() {
                 </CardHeader>
                 <CardContent>
                   <p className="text-sm text-gray-500 dark:text-gray-400">
-                    "ScribeWise helped me organize my case notes and prepare for the bar exam. I'm convinced it saved me
-                    hundreds of hours of study time."
+                    &quot;ScribeWise helped me organize my case notes and prepare for the bar exam. I&apos;m convinced it saved me
+                    hundreds of hours of study time.&quot;
                   </p>
                 </CardContent>
               </Card>
