@@ -216,3 +216,22 @@ dist
 .wrangler/
 
 .open-next
+
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+
+
+# torch
+torch_cache/
+
+# downloads
+downloads/
+
+# outputs
+outputs/

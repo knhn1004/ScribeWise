@@ -1,0 +1,43 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: scribewise-web
+    command: pnpm dev
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/app
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+    depends_on:
+      - backend
+
+  backend:
+    build:
+      context: ./scripts
+      dockerfile: Dockerfile.dev
+    container_name: scribewise-backend
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./scripts:/app
+      - ./scripts/downloads:/app/downloads
+      - ./scripts/outputs:/app/outputs
+      - /tmp:/tmp
+    environment:
+      - PYTHONUNBUFFERED=1
+      - ENV=development
+      - OUTPUT_DIR=/app/outputs
+      - DOWNLOAD_DIR=/app/downloads
+      - DEBUG=true
+      - LLM_MODEL=llama3-70b-8192
+      - STT_MODEL=whisper-large-v3-turbo
+      - LOG_LEVEL=INFO
+      - PYTORCH_NO_CUDA_MEMORY_CACHING=1
+      - TORCH_USE_RTLD_GLOBAL=1
+      - TMPDIR=/tmp
+      - TORCH_HOME=/app/torch_cache 
