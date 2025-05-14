@@ -5,7 +5,7 @@ ScribeWise Backend Server
 
 import os
 import asyncio
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Request
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Any
 from services.imaging_service import ImagingService
 from services.transcription_service import TranscriptionService
 from services.summarization_service import SummarizationService
+from services.pdf_service import PDFService
 
 # Import models and utilities
 from models.schemas import (
@@ -57,6 +58,10 @@ Config.setup()
 PROCESSED_DIR = os.path.join(Config.OUTPUT_DIR, "processed")
 os.makedirs(PROCESSED_DIR, exist_ok=True)
 
+# Create a directory to store processed PDFs
+PROCESSED_PDF_DIR = os.path.join(Config.OUTPUT_DIR, "processed_pdfs")
+os.makedirs(PROCESSED_PDF_DIR, exist_ok=True)
+
 # Log the models being used
 logger.info(f"Using Groq text model: {Config.LLM_MODEL}")
 logger.info(f"Using Groq speech model: {Config.STT_MODEL}")
@@ -67,13 +72,22 @@ transcription_service = TranscriptionService(
     output_dir=Config.DOWNLOAD_DIR, model=Config.STT_MODEL
 )
 summarization_service = SummarizationService(output_dir=Config.OUTPUT_DIR)
+pdf_service = PDFService(output_dir=Config.OUTPUT_DIR, download_dir=Config.DOWNLOAD_DIR)
 
 # Log if mermaid-py is available
 try:
     import mermaid as md
+
     logger.info("mermaid-py is available - mindmap image generation is enabled")
 except ImportError:
     logger.warning("mermaid-py is not available - mindmap image generation is disabled")
+
+# Check if PyMuPDF is available
+try:
+    import fitz
+    logger.info("PyMuPDF is available - PDF processing is enabled")
+except ImportError:
+    logger.warning("PyMuPDF is not available - PDF processing is disabled")
 
 # Set up static files to serve output files
 app.mount("/outputs", StaticFiles(directory=Config.OUTPUT_DIR), name="outputs")
@@ -81,6 +95,8 @@ app.mount("/downloads", StaticFiles(directory=Config.DOWNLOAD_DIR), name="downlo
 
 # Store in-progress processing tasks
 processing_tasks: Dict[str, Dict[str, Any]] = {}
+# Store PDF processing tasks
+pdf_processing_tasks: Dict[str, Dict[str, Any]] = {}
 
 
 def validate_api_keys():
@@ -102,14 +118,15 @@ def read_root():
 def health_check():
     """Health check endpoint that verifies API keys and system status"""
     features = Config.check_optional_features()
-    
+
     # Check for mermaid-py availability
     try:
         import mermaid as md
+
         features["mindmap_images"] = True
     except ImportError:
         features["mindmap_images"] = False
-    
+
     if not Config.check_api_keys():
         return JSONResponse(
             status_code=200,
@@ -175,12 +192,14 @@ async def process_video_task(video_request: ProcessVideoRequest, request_id: str
         }
 
         outputs = await summarization_service.process_content(content_for_summarization)
-        
+
         # Check if mindmap image was generated
         if "mindmap_image_path" in outputs:
             logger.info(f"Mindmap image generated: {outputs['mindmap_image_path']}")
             # Make the path relative to the output directory for proper URL construction
-            outputs["mindmap_image_url"] = f"/outputs/{os.path.basename(outputs['mindmap_image_path'])}"
+            outputs["mindmap_image_url"] = (
+                f"/outputs/{os.path.basename(outputs['mindmap_image_path'])}"
+            )
 
         # Update task status to complete
         processing_tasks[request_id]["status"] = "complete"
@@ -304,7 +323,7 @@ async def get_processed_video(video_id: str):
 
     try:
         data = load_json(processed_file)
-        
+
         # Check if we need to add the mindmap image URL in case of older processed files
         if "outputs" in data and "mindmap_path" in data["outputs"]:
             mindmap_image_path = data["outputs"]["mindmap_path"].replace(".md", ".png")
@@ -312,8 +331,10 @@ async def get_processed_video(video_id: str):
                 # Add the mindmap image URL if it exists but wasn't in the original data
                 if "mindmap_image_path" not in data["outputs"]:
                     data["outputs"]["mindmap_image_path"] = mindmap_image_path
-                    data["outputs"]["mindmap_image_url"] = f"/outputs/{os.path.basename(mindmap_image_path)}"
-        
+                    data["outputs"][
+                        "mindmap_image_url"
+                    ] = f"/outputs/{os.path.basename(mindmap_image_path)}"
+
         return data
     except Exception as e:
         logger.error(f"Error loading processed video: {str(e)}", exc_info=True)
@@ -327,90 +348,102 @@ async def get_mindmap_image(video_id: str):
     """Get the mindmap image for a processed video"""
     # Check if the SVG mindmap image exists first (preferred format)
     mindmap_svg_path = os.path.join(Config.OUTPUT_DIR, f"{video_id}_mindmap.svg")
-    
+
     # Check if the PNG mindmap image exists (fallback)
     mindmap_png_path = os.path.join(Config.OUTPUT_DIR, f"{video_id}_mindmap.png")
-    
+
     if os.path.exists(mindmap_svg_path):
         # SVG exists, return it
         return FileResponse(
-            mindmap_svg_path, 
+            mindmap_svg_path,
             media_type="image/svg+xml",
-            filename=f"{video_id}_mindmap.svg"
+            filename=f"{video_id}_mindmap.svg",
         )
     elif os.path.exists(mindmap_png_path):
         # PNG exists, return it
         return FileResponse(
-            mindmap_png_path, 
-            media_type="image/png",
-            filename=f"{video_id}_mindmap.png"
+            mindmap_png_path, media_type="image/png", filename=f"{video_id}_mindmap.png"
         )
     else:
         # Try to generate it on-demand if the markdown file exists
         mindmap_md_path = os.path.join(Config.OUTPUT_DIR, f"{video_id}_mindmap.md")
-        
+
         if os.path.exists(mindmap_md_path):
             try:
                 # Generate image from the markdown file
                 with open(mindmap_md_path, "r") as f:
                     mermaid_content = f.read()
-                
+
                 try:
                     import mermaid as md
+
                     # Set the environment variable for mermaid.ink server
                     os.environ["MERMAID_INK_SERVER"] = "https://mermaid.ink"
-                    
+
                     # Clean mermaid content
                     import re
+
                     if "```mermaid" in mermaid_content:
-                        mermaid_match = re.search(r'```mermaid\s*(.*?)```', mermaid_content, re.DOTALL)
+                        mermaid_match = re.search(
+                            r"```mermaid\s*(.*?)```", mermaid_content, re.DOTALL
+                        )
                         if mermaid_match:
                             clean_content = mermaid_match.group(1).strip()
                         else:
                             clean_content = mermaid_content
                     else:
                         clean_content = mermaid_content.strip()
-                        
+
                     # Ensure content starts with mindmap if it's a mindmap
-                    if "mindmap" not in clean_content.split('\n')[0]:
+                    if "mindmap" not in clean_content.split("\n")[0]:
                         clean_content = "mindmap\n" + clean_content
-                    
+
                     # Create diagram
                     diagram = md.Mermaid(clean_content)
-                    
+
                     # Save as SVG (preferred)
-                    svg_path = os.path.join(Config.OUTPUT_DIR, f"{video_id}_mindmap.svg")
+                    svg_path = os.path.join(
+                        Config.OUTPUT_DIR, f"{video_id}_mindmap.svg"
+                    )
                     diagram.to_svg(svg_path)
-                    
+
                     # Check if SVG was created successfully
                     if os.path.exists(svg_path) and os.path.getsize(svg_path) > 0:
-                        logger.info(f"Generated SVG mindmap image on-demand: {svg_path}")
+                        logger.info(
+                            f"Generated SVG mindmap image on-demand: {svg_path}"
+                        )
                         return FileResponse(
                             svg_path,
                             media_type="image/svg+xml",
-                            filename=f"{video_id}_mindmap.svg"
+                            filename=f"{video_id}_mindmap.svg",
                         )
                     else:
                         raise HTTPException(
                             status_code=500,
-                            detail=f"Failed to generate SVG image: file not created or empty"
+                            detail=f"Failed to generate SVG image: file not created or empty",
                         )
                 except ImportError:
                     raise HTTPException(
-                        status_code=501, 
-                        detail="mermaid-py is not available for image generation"
+                        status_code=501,
+                        detail="mermaid-py is not available for image generation",
                     )
                 except Exception as e:
-                    logger.error(f"Error generating mindmap image: {str(e)}", exc_info=True)
+                    logger.error(
+                        f"Error generating mindmap image: {str(e)}", exc_info=True
+                    )
                     raise HTTPException(
-                        status_code=500, 
-                        detail=f"Error generating mindmap image: {str(e)}"
+                        status_code=500,
+                        detail=f"Error generating mindmap image: {str(e)}",
                     )
             except Exception as e:
                 logger.error(f"Error reading mindmap markdown: {str(e)}", exc_info=True)
-                raise HTTPException(status_code=500, detail=f"Error reading mindmap markdown: {str(e)}")
+                raise HTTPException(
+                    status_code=500, detail=f"Error reading mindmap markdown: {str(e)}"
+                )
         else:
-            raise HTTPException(status_code=404, detail=f"Mindmap not found for video {video_id}")
+            raise HTTPException(
+                status_code=404, detail=f"Mindmap not found for video {video_id}"
+            )
 
 
 @app.get("/files/{file_path:path}")
@@ -445,6 +478,191 @@ async def general_exception_handler(request: Request, exc: Exception):
             status="error", error="Internal server error", details={"message": str(exc)}
         ).dict(),
     )
+
+
+async def process_pdf_task(pdf_path: str, pdf_id: str, request_id: str):
+    """Background task to process a PDF file"""
+    try:
+        # Update task status
+        pdf_processing_tasks[request_id]["status"] = "extracting_text"
+        
+        # Process the PDF
+        results = await pdf_service.process_pdf(pdf_path, summarization_service)
+        
+        # Update task status to complete
+        pdf_processing_tasks[request_id]["status"] = "complete"
+        pdf_processing_tasks[request_id]["results"] = results
+        
+        # Save the processed result to disk for later retrieval
+        processed_file = os.path.join(PROCESSED_PDF_DIR, f"{pdf_id}.json")
+        save_json(results, processed_file)
+        
+    except Exception as e:
+        logger.error(f"Error processing PDF: {str(e)}", exc_info=True)
+        pdf_processing_tasks[request_id]["status"] = "error"
+        pdf_processing_tasks[request_id]["error"] = str(e)
+
+
+@app.post("/process-pdf", response_model=Dict[str, Any])
+async def process_pdf(
+    background_tasks: BackgroundTasks,
+    pdf_file: UploadFile = File(...),
+    _: Dict = Depends(validate_api_keys),
+):
+    """
+    Process a PDF file:
+    1. Extract text from PDF
+    2. Generate mindmap from entire document
+    3. Split text into chunks
+    4. Generate notes and flashcards for each chunk
+    5. Combine results
+    """
+    # Create a unique request ID
+    import uuid
+    request_id = str(uuid.uuid4())
+    
+    try:
+        # Read uploaded file content
+        file_content = await pdf_file.read()
+        
+        # Save the uploaded PDF
+        pdf_info = await pdf_service.save_uploaded_pdf(file_content, pdf_file.filename)
+        
+        # Initialize task entry
+        pdf_processing_tasks[request_id] = {
+            "status": "queued",
+            "pdf_info": pdf_info,
+            "created_at": asyncio.get_event_loop().time(),
+        }
+        
+        # Start processing in the background
+        background_tasks.add_task(
+            process_pdf_task, 
+            pdf_info["pdf_path"], 
+            pdf_info["pdf_id"], 
+            request_id
+        )
+        
+        # Return the task ID for status checking
+        return {
+            "request_id": request_id,
+            "status": "queued",
+            "message": "PDF processing started",
+            "pdf_info": {
+                "pdf_id": pdf_info["pdf_id"],
+                "filename": pdf_info["filename"],
+                "file_size": pdf_info["file_size"],
+            },
+            "model": Config.LLM_MODEL,
+        }
+        
+    except Exception as e:
+        logger.error(f"Error handling PDF upload: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error processing PDF: {str(e)}"
+        )
+
+
+@app.get("/pdf-status/{request_id}")
+async def get_pdf_processing_status(request_id: str):
+    """Get the status of a PDF processing request"""
+    if request_id not in pdf_processing_tasks:
+        raise HTTPException(
+            status_code=404, detail=f"PDF request ID {request_id} not found"
+        )
+
+    task = pdf_processing_tasks[request_id]
+    response = {"request_id": request_id, "status": task["status"]}
+
+    # Include more details based on status
+    if task["status"] == "complete":
+        if "results" in task:
+            response["results"] = task["results"]
+    elif task["status"] == "error":
+        response["error"] = task.get("error", "Unknown error")
+    elif task["status"] in ["extracting_text", "processing_chunks"]:
+        response["progress"] = task["status"]
+        if "pdf_info" in task:
+            response["pdf_info"] = task["pdf_info"]
+
+    return response
+
+
+@app.get("/pdfs/{pdf_id}")
+async def get_processed_pdf(pdf_id: str):
+    """Get a processed PDF by ID"""
+    processed_file = os.path.join(PROCESSED_PDF_DIR, f"{pdf_id}.json")
+
+    if not os.path.exists(processed_file):
+        raise HTTPException(status_code=404, detail=f"PDF {pdf_id} not found")
+
+    try:
+        data = load_json(processed_file)
+        return data
+    except Exception as e:
+        logger.error(f"Error loading processed PDF: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500, detail=f"Error loading PDF data: {str(e)}"
+        )
+
+
+@app.get("/pdf-mindmap-image/{pdf_id}")
+async def get_pdf_mindmap_image(pdf_id: str):
+    """Get the mindmap image for a processed PDF"""
+    # Check if the SVG mindmap image exists
+    pdf_dir = os.path.join(Config.OUTPUT_DIR, pdf_id)
+    mindmap_svg_path = os.path.join(pdf_dir, f"{pdf_id}_mindmap.svg")
+
+    if os.path.exists(mindmap_svg_path):
+        return FileResponse(
+            mindmap_svg_path,
+            media_type="image/svg+xml",
+            filename=f"{pdf_id}_mindmap.svg",
+        )
+    else:
+        # Check if the markdown file exists and try to generate image
+        mindmap_md_path = os.path.join(pdf_dir, f"{pdf_id}_mindmap.md")
+        
+        if os.path.exists(mindmap_md_path):
+            try:
+                # Generate image from the markdown file if mermaid is available
+                if not summarization_service._convert_mermaid_to_image:
+                    raise HTTPException(
+                        status_code=501,
+                        detail="mermaid-py is not available for image generation",
+                    )
+                    
+                with open(mindmap_md_path, "r") as f:
+                    mermaid_content = f.read()
+                    
+                image_path = summarization_service._convert_mermaid_to_image(
+                    mermaid_content, 
+                    os.path.join(pdf_dir, f"{pdf_id}_mindmap")
+                )
+                
+                if image_path and os.path.exists(image_path):
+                    return FileResponse(
+                        image_path,
+                        media_type="image/svg+xml",
+                        filename=f"{pdf_id}_mindmap.svg",
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Failed to generate mindmap image",
+                    )
+            except Exception as e:
+                logger.error(f"Error generating PDF mindmap image: {str(e)}", exc_info=True)
+                raise HTTPException(
+                    status_code=500, 
+                    detail=f"Error generating mindmap image: {str(e)}"
+                )
+        else:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Mindmap not found for PDF {pdf_id}"
+            )
 
 
 if __name__ == "__main__":

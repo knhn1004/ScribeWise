@@ -2,8 +2,9 @@
 Pydantic models for ScribeWise API request and response validation
 """
 
-from pydantic import BaseModel, Field, HttpUrl
-from typing import List, Dict, Optional, Any
+from pydantic import BaseModel, Field, HttpUrl, field_validator
+from typing import List, Dict, Optional, Any, Union
+from datetime import datetime
 
 
 class ProcessVideoRequest(BaseModel):
@@ -29,6 +30,17 @@ class ProcessVideoRequest(BaseModel):
         default=None,
         description="Groq speech model to use for transcription. If not provided, the default from configuration will be used.",
     )
+
+    @field_validator('url')
+    @classmethod
+    def url_must_be_supported(cls, v):
+        """Validate that the URL is from a supported platform"""
+        supported_platforms = ["youtube.com", "youtu.be", "vimeo.com"]
+        if not any(platform in str(v) for platform in supported_platforms):
+            raise ValueError(
+                f"URL must be from a supported platform: {', '.join(supported_platforms)}"
+            )
+        return v
 
 
 class VideoInfo(BaseModel):
@@ -102,6 +114,35 @@ class FlashcardOutput(BaseModel):
     flashcards: List[FlashcardModel] = Field(
         ..., description="List of generated flashcards"
     )
+
+
+class PDFInfo(BaseModel):
+    """Information about a processed PDF"""
+
+    pdf_id: str = Field(..., description="Unique identifier for the PDF")
+    title: Optional[str] = Field(None, description="Title of the PDF")
+    filename: str = Field(..., description="Filename of the PDF")
+    page_count: Optional[int] = Field(None, description="Number of pages in the PDF")
+    file_size: Optional[int] = Field(None, description="Size of the PDF file in bytes")
+
+
+class PDFProcessingStatus(BaseModel):
+    """Status of a PDF processing request"""
+
+    request_id: str = Field(..., description="Request ID for the PDF processing task")
+    status: str = Field(..., description="Status of the processing task")
+    pdf_info: Optional[PDFInfo] = Field(None, description="Information about the PDF")
+    error: Optional[str] = Field(None, description="Error message, if any")
+    results: Optional[Dict[str, Any]] = Field(None, description="Processing results")
+
+
+class PDFProcessingResult(BaseModel):
+    """Result of PDF processing"""
+
+    pdf_info: PDFInfo = Field(..., description="Information about the PDF")
+    notes: Dict[str, Any] = Field(..., description="Generated notes")
+    flashcards: Dict[str, Any] = Field(..., description="Generated flashcards")
+    mindmap: Optional[Dict[str, Any]] = Field(None, description="Generated mindmap")
 
 
 class ErrorResponse(BaseModel):

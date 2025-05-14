@@ -1,1 +1,1 @@
-# ScribeWise models module initialization 
+# ScribeWise models module initialization

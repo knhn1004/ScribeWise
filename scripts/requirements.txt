@@ -27,3 +27,4 @@ python-jose
 genanki 
 mermaid-py 
 scenedetect 
+pymupdf

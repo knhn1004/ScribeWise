@@ -14,8 +14,11 @@ print("Testing mermaid-py import and functionality...")
 
 try:
     import mermaid as md
+
     print("✅ Successfully imported mermaid-py")
-    print(f"Mermaid-py version: {md.__version__ if hasattr(md, '__version__') else 'unknown'}")
+    print(
+        f"Mermaid-py version: {md.__version__ if hasattr(md, '__version__') else 'unknown'}"
+    )
 except ImportError as e:
     print(f"❌ Failed to import mermaid-py: {e}")
     print("Try installing it with: pip install mermaid-py")
@@ -44,16 +47,19 @@ if os.path.exists(mindmap_file):
         with open(mindmap_file, "r") as f:
             file_content = f.read()
         print(f"Successfully read mindmap file, length: {len(file_content)} chars")
-        
+
         # Parse the content to extract mermaid diagram
         import re
+
         if "```mermaid" in file_content:
-            mermaid_match = re.search(r'```mermaid\s*(.*?)```', file_content, re.DOTALL)
+            mermaid_match = re.search(r"```mermaid\s*(.*?)```", file_content, re.DOTALL)
             if mermaid_match:
                 mindmap_content = mermaid_match.group(1).strip()
                 print("Successfully extracted mermaid content from file")
             else:
-                print("WARNING: Could not extract mermaid content, using sample content instead")
+                print(
+                    "WARNING: Could not extract mermaid content, using sample content instead"
+                )
     except Exception as e:
         print(f"Error reading file: {e}")
 else:
@@ -63,27 +69,32 @@ else:
 try:
     print("Creating Mermaid diagram object...")
     diagram = md.Mermaid(mindmap_content)
-    
-    print("Available methods:", ", ".join([m for m in dir(diagram) if not m.startswith('_')]))
-    
+
+    print(
+        "Available methods:",
+        ", ".join([m for m in dir(diagram) if not m.startswith("_")]),
+    )
+
     # Check the mermaid content
     print("\nMermaid content being used:")
     print("---------------------------")
     print(mindmap_content)
     print("---------------------------")
-    
+
     # Try to use to_svg first to see if that works
     try:
         print("\nTrying to_svg method first...")
         svg_path = f"{output_dir}/test_mermaid_output.svg"
         diagram.to_svg(svg_path)
-        
+
         if os.path.exists(svg_path):
             filesize = os.path.getsize(svg_path)
-            print(f"✅ Successfully created SVG image: {svg_path} ({filesize/1024:.2f} KB)")
-            
+            print(
+                f"✅ Successfully created SVG image: {svg_path} ({filesize/1024:.2f} KB)"
+            )
+
             # Check SVG content
-            with open(svg_path, 'r') as f:
+            with open(svg_path, "r") as f:
                 svg_content = f.read()
                 print(f"SVG content length: {len(svg_content)} chars")
                 print(f"SVG content starts with: {svg_content[:100]}...")
@@ -91,20 +102,22 @@ try:
             print(f"❌ SVG file not created at {svg_path}")
     except Exception as svg_error:
         print(f"❌ Error generating SVG: {svg_error}")
-    
+
     # Use to_png to save the diagram
     try:
         print("\nTrying to_png method...")
         output_path = f"{output_dir}/test_mermaid_output.png"
-        
+
         # to_png requires a path parameter
         print(f"Calling diagram.to_png({output_path})")
         diagram.to_png(output_path)
-        
+
         if os.path.exists(output_path):
             filesize = os.path.getsize(output_path)
-            print(f"✅ Successfully created PNG image: {output_path} ({filesize/1024:.2f} KB)")
-            
+            print(
+                f"✅ Successfully created PNG image: {output_path} ({filesize/1024:.2f} KB)"
+            )
+
             # Check PNG content if it's empty
             if filesize == 0:
                 print("⚠️ WARNING: PNG file has zero size!")
@@ -113,19 +126,20 @@ try:
     except Exception as e:
         print(f"❌ Error generating PNG: {e}")
         import traceback
+
         traceback.print_exc()
-    
+
     # Create an HTML file that includes the SVG for viewing in a browser
     try:
         print("\nCreating HTML test file to view SVG...")
         svg_path = f"{output_dir}/test_mermaid_output.svg"
         html_path = f"{output_dir}/test_mermaid_viewer.html"
-        
+
         if os.path.exists(svg_path):
             # Read the SVG content
-            with open(svg_path, 'r') as f:
+            with open(svg_path, "r") as f:
                 svg_content = f.read()
-            
+
             # Create a simple HTML page with the SVG embedded
             html_content = f"""<!DOCTYPE html>
 <html>
@@ -189,21 +203,24 @@ try:
 </body>
 </html>
 """
-            
+
             # Write the HTML file
-            with open(html_path, 'w') as f:
+            with open(html_path, "w") as f:
                 f.write(html_content)
-            
+
             print(f"✅ Created HTML viewer at: {html_path}")
             print(f"   Open this file in a browser to view the SVG with zoom controls")
         else:
-            print(f"❌ Cannot create HTML viewer because SVG file not found at {svg_path}")
+            print(
+                f"❌ Cannot create HTML viewer because SVG file not found at {svg_path}"
+            )
     except Exception as e:
         print(f"❌ Error creating HTML viewer: {e}")
-    
+
 except Exception as e:
     print(f"❌ Error creating diagram: {e}")
     import traceback
+
     traceback.print_exc()
 
-print("\nTest completed!") 
+print("\nTest completed!")

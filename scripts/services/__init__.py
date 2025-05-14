@@ -1,1 +1,1 @@
-# ScribeWise services module initialization 
+# ScribeWise services module initialization

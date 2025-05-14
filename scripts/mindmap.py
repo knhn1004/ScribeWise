@@ -23,12 +23,15 @@ As per the mermaid mindmap notation above, please organize the given information
 Only output the mindmap
 """
 
-client = Groq() 
+client = Groq()
 chat_completion = client.chat.completions.create(
     model="llama-3.3-70b-versatile",
     messages=[
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Create a mindmap for the following text:\n {text}"}
+        {
+            "role": "user",
+            "content": f"Create a mindmap for the following text:\n {text}",
+        },
     ],
     temperature=0.5,
     stream=False,

@@ -342,12 +342,14 @@ class TranscriptionService:
                     response_segments = response["segments"]
                 else:
                     # No segments found, use full text
-                    text = response.text if hasattr(response, "text") else response.get("text", "")
-                    segments.append(
-                        TranscriptionSegment(start=0.0, end=0.0, text=text)
+                    text = (
+                        response.text
+                        if hasattr(response, "text")
+                        else response.get("text", "")
                     )
+                    segments.append(TranscriptionSegment(start=0.0, end=0.0, text=text))
                     return segments
-                
+
                 # Process segments
                 for seg in response_segments:
                     # Handle both object.attribute and dict["key"] access
@@ -361,11 +363,9 @@ class TranscriptionService:
                         start = getattr(seg, "start", 0.0)
                         end = getattr(seg, "end", 0.0)
                         text = getattr(seg, "text", "")
-                    
+
                     segments.append(
-                        TranscriptionSegment(
-                            start=start, end=end, text=text
-                        )
+                        TranscriptionSegment(start=start, end=end, text=text)
                     )
 
             return segments
