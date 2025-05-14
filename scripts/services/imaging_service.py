@@ -20,6 +20,8 @@ import tempfile
 import logging
 from datetime import datetime
 import uuid
+from scenedetect import VideoManager, SceneManager
+from scenedetect.detectors import ContentDetector
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -66,23 +68,50 @@ class ImagingService:
     async def download_video(self, url: str) -> Dict[str, str]:
         """Download a video from URL and return file paths"""
         ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]',
+            # Explicitly exclude AV1 codec and prefer H.264/MP4
+            'format': 'bestvideo[vcodec!*=av01][ext=mp4]+bestaudio[ext=m4a]/best[vcodec!*=av01][ext=mp4]/best[ext=mp4]/best',
             'outtmpl': f'{self.output_dir}/%(id)s.%(ext)s',
             'noplaylist': True,
-            'quiet': True
+            'quiet': False,  # Enable output for better debugging
+            'recode_video': 'mp4',  # Force re-encode to mp4 (H.264)
+            'postprocessor_args': {
+                'ffmpeg': ['-codec:v', 'libx264', '-crf', '23']  # Force H.264 encoding with reasonable quality
+            },
+            # Retry options for more reliable downloads
+            'retries': 5,
+            'fragment_retries': 5
         }
         
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                logger.info(f"Downloading video from URL: {url}")
                 info = ydl.extract_info(url, download=True)
-                video_path = f"{self.output_dir}/{info['id']}.mp4"
+                video_id = info['id']
+                
+                # Verify that the file exists with expected format
+                video_path = f"{self.output_dir}/{video_id}.mp4"
+                if not os.path.exists(video_path):
+                    # Try looking for other extensions as fallback
+                    for ext in ['mkv', 'webm', 'mp4']:
+                        alt_path = f"{self.output_dir}/{video_id}.{ext}"
+                        if os.path.exists(alt_path):
+                            logger.warning(f"Found video with unexpected format: {alt_path}")
+                            video_path = alt_path
+                            break
+                            
+                if not os.path.exists(video_path):
+                    raise Exception(f"Downloaded video file not found: {video_path}")
+                    
+                logger.info(f"Successfully downloaded video to: {video_path}")
+                
                 return {
                     "video_path": video_path,
-                    "video_id": info['id'],
+                    "video_id": video_id,
                     "title": info.get('title', 'Unknown'),
                     "duration": info.get('duration', 0)
                 }
         except Exception as e:
+            logger.error(f"Error downloading video: {str(e)}")
             raise Exception(f"Error downloading video: {str(e)}")
     
     async def extract_frames(self, video_path: str, interval: int = 1) -> List[np.ndarray]:
@@ -145,42 +174,201 @@ class ImagingService:
                 
         return scene_changes
     
+    async def extract_scenes_pyscenedetect(self, video_path: str) -> List[Tuple[int, np.ndarray]]:
+        """
+        Extract scene boundaries and key frames using PySceneDetect
+        Returns a list of tuples (frame_number, frame_image)
+        """
+        if not os.path.exists(video_path):
+            logger.error(f"Video file does not exist: {video_path}")
+            raise Exception(f"Video file not found: {video_path}")
+            
+        # Check video codec before processing
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['ffprobe', '-v', 'error', '-select_streams', 'v:0', 
+                 '-show_entries', 'stream=codec_name', '-of', 'default=noprint_wrappers=1:nokey=1', 
+                 video_path],
+                capture_output=True, text=True
+            )
+            codec = result.stdout.strip()
+            logger.info(f"Video codec detected: {codec}")
+            
+            if 'av1' in codec.lower():
+                logger.warning(f"AV1 codec detected, trying to transcode to H.264 first")
+                # Create a temporary file for the transcoded video
+                temp_output = f"{os.path.splitext(video_path)[0]}_h264.mp4"
+                
+                # Transcode the video to H.264
+                transcode_cmd = [
+                    'ffmpeg', '-y', '-i', video_path,
+                    '-c:v', 'libx264', '-crf', '23',
+                    '-c:a', 'aac', '-preset', 'fast',
+                    temp_output
+                ]
+                subprocess.run(transcode_cmd, check=True)
+                
+                if os.path.exists(temp_output):
+                    logger.info(f"Successfully transcoded video to H.264: {temp_output}")
+                    video_path = temp_output
+                else:
+                    logger.warning("Transcoding failed, will try original file anyway")
+        except Exception as e:
+            logger.warning(f"Failed to check or transcode video: {str(e)}")
+        
+        try:
+            # Try multiple threshold values if needed
+            thresholds = [15.0, 30.0, 45.0]
+            scenes = []
+            
+            for threshold in thresholds:
+                video_manager = VideoManager([video_path])
+                scene_manager = SceneManager()
+                scene_manager.add_detector(ContentDetector(threshold=threshold))
+                
+                # Set downscale factor to improve performance
+                video_manager.set_downscale_factor(factor=2)
+                
+                # Start the video manager and perform scene detection
+                logger.info(f"Starting PySceneDetect with threshold={threshold}")
+                video_manager.start()
+                scene_manager.detect_scenes(frame_source=video_manager)
+                scene_list = scene_manager.get_scene_list()
+                video_manager.release()
+                
+                logger.info(f"PySceneDetect: threshold={threshold}, scenes found={len(scene_list)}")
+                
+                # If scenes are found, break the loop
+                if len(scene_list) > 0:
+                    break
+            
+            # Extract frames from scene boundaries
+            cap = cv2.VideoCapture(video_path)
+            
+            if not cap.isOpened():
+                logger.error(f"Failed to open video: {video_path}")
+                raise Exception(f"Failed to open video: {video_path}")
+                
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            logger.info(f"Video properties: {width}x{height} @ {fps}fps")
+            
+            if len(scene_list) == 0:
+                logger.warning("No scenes detected, extracting first frame as fallback.")
+                
+                # Try to extract the first frame
+                success, frame = cap.read()
+                if success and frame is not None:
+                    scenes.append((0, frame))
+                    logger.info("Successfully extracted first frame as fallback")
+                else:
+                    # If first frame fails, try several positions
+                    logger.warning("Failed to read first frame, trying alternative positions")
+                    for pos in [0.1, 0.25, 0.5, 0.75]:
+                        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                        target_frame = int(total_frames * pos)
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+                        success, frame = cap.read()
+                        if success and frame is not None:
+                            scenes.append((target_frame, frame))
+                            logger.info(f"Successfully extracted frame at position {pos}")
+                            break
+            else:
+                # Process detected scenes normally
+                for scene in scene_list:
+                    frame_num = scene[0].get_frames()
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                    success, frame = cap.read()
+                    if success and frame is not None:
+                        scenes.append((frame_num, frame))
+                
+            cap.release()
+            
+            if len(scenes) == 0:
+                logger.error("No frames could be extracted from the video after all attempts")
+                raise Exception("Failed to extract any frames from video")
+                
+            logger.info(f"Successfully extracted {len(scenes)} frames from video")
+            return scenes
+            
+        except Exception as e:
+            logger.error(f"Error in scene detection: {str(e)}")
+            try:
+                # Last resort: try simple frame extraction at fixed intervals
+                logger.warning("Attempting fixed interval frame extraction as last resort")
+                cap = cv2.VideoCapture(video_path)
+                if not cap.isOpened():
+                    raise Exception("Cannot open video even for last resort extraction")
+                    
+                # Extract frames at fixed intervals (10% intervals)
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                intervals = [int(total_frames * p) for p in [0.1, 0.3, 0.5, 0.7, 0.9]]
+                
+                scenes = []
+                for frame_pos in intervals:
+                    if frame_pos <= 0:
+                        continue
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
+                    success, frame = cap.read()
+                    if success and frame is not None:
+                        scenes.append((frame_pos, frame))
+                        
+                cap.release()
+                
+                if len(scenes) > 0:
+                    logger.info(f"Last resort extraction found {len(scenes)} frames")
+                    return scenes
+            except Exception as inner_e:
+                logger.error(f"Last resort extraction also failed: {str(inner_e)}")
+                
+            raise Exception(f"Scene detection and all fallbacks failed: {str(e)}")
+    
     async def process_video(self, url: str) -> Dict:
-        """Complete process of downloading and analyzing video scenes"""
-        # Download the video
-        video_info = await self.download_video(url)
-        video_path = video_info["video_path"]
-        
-        # Extract frames
-        frames = await self.extract_frames(video_path)
-        
-        # Compute features
-        features = await self.compute_frame_features(frames)
-        
-        # Detect scene changes
-        scene_changes = await self.detect_scene_changes(features)
-        
-        # Extract key frames for each scene
-        key_frames = []
-        scene_times = []
-        
-        cap = cv2.VideoCapture(video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        
-        for scene_idx in scene_changes:
-            frame_time = scene_idx / fps
-            scene_times.append(frame_time)
+        """Process video and extract key frames."""
+        try:
+            # Download the video
+            video_info = await self.download_video(url)
+            video_path = video_info["video_path"]
             
-            # Save key frame for this scene
-            frame_path = f"{self.output_dir}/{video_info['video_id']}_scene_{len(key_frames)}.jpg"
-            cv2.imwrite(frame_path, cv2.cvtColor(frames[scene_idx], cv2.COLOR_RGB2BGR))
-            key_frames.append(frame_path)
+            if not os.path.exists(video_path):
+                logger.error(f"Downloaded video file not found: {video_path}")
+                raise Exception(f"Video file not found: {video_path}")
+                
+            # Use PySceneDetect for scene splitting
+            logger.info(f"Using PySceneDetect for scene splitting: {video_path}")
+            scenes = await self.extract_scenes_pyscenedetect(video_path)
             
-        cap.release()
-        
-        return {
-            "video_info": video_info,
-            "scene_times": scene_times,
-            "key_frames": key_frames,
-            "total_scenes": len(scene_changes)
-        } 
+            if not scenes:
+                logger.error("No scenes detected or frames extracted. Check video file and PySceneDetect settings.")
+                raise Exception("No scenes detected in video.")
+            
+            # Save extracted frames to files
+            key_frames = []
+            scene_times = []
+            fps = cv2.VideoCapture(video_path).get(cv2.CAP_PROP_FPS)
+            
+            for i, (frame_num, frame) in enumerate(scenes):
+                # Convert frame number to time
+                frame_time = frame_num / fps if fps > 0 else 0
+                scene_times.append(frame_time)
+                
+                # Save the frame as an image
+                frame_path = f"{self.output_dir}/scene_{i}.jpg"
+                cv2.imwrite(frame_path, frame)
+                key_frames.append(frame_path)
+                
+                logger.info(f"Saved frame {i} to {frame_path}")
+            
+            return {
+                "video_info": video_info,
+                "scene_times": scene_times,
+                "key_frames": key_frames,
+                "total_scenes": len(scenes)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error processing video: {str(e)}")
+            raise Exception(f"Error processing video: {str(e)}") 
