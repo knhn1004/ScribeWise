@@ -28,16 +28,6 @@ export default function LandingPage() {
               Testimonials
             </Link>
           </nav>
-          <div className="flex items-center gap-4">
-            <Link href="/login">
-              <Button variant="ghost" size="sm">
-                Log in
-              </Button>
-            </Link>
-            <Link href="/signup">
-              <Button size="sm">Get Started</Button>
-            </Link>
-          </div>
         </div>
       </header>
 
@@ -57,9 +47,9 @@ export default function LandingPage() {
                   </p>
                 </div>
                 <div className="flex flex-col gap-2 min-[400px]:flex-row">
-                  <Link href="/signup">
+                  <Link href="/dashboard">
                     <Button size="lg" className="w-full min-[400px]:w-auto">
-                      Start Free Trial
+						Get Started
                     </Button>
                   </Link>
                   <Link href="#how-it-works">
