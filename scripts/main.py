@@ -68,6 +68,13 @@ transcription_service = TranscriptionService(
 )
 summarization_service = SummarizationService(output_dir=Config.OUTPUT_DIR)
 
+# Log if mermaid-py is available
+try:
+    import mermaid as md
+    logger.info("mermaid-py is available - mindmap image generation is enabled")
+except ImportError:
+    logger.warning("mermaid-py is not available - mindmap image generation is disabled")
+
 # Set up static files to serve output files
 app.mount("/outputs", StaticFiles(directory=Config.OUTPUT_DIR), name="outputs")
 app.mount("/downloads", StaticFiles(directory=Config.DOWNLOAD_DIR), name="downloads")
@@ -94,6 +101,15 @@ def read_root():
 @app.get("/health")
 def health_check():
     """Health check endpoint that verifies API keys and system status"""
+    features = Config.check_optional_features()
+    
+    # Check for mermaid-py availability
+    try:
+        import mermaid as md
+        features["mindmap_images"] = True
+    except ImportError:
+        features["mindmap_images"] = False
+    
     if not Config.check_api_keys():
         return JSONResponse(
             status_code=200,
@@ -101,14 +117,14 @@ def health_check():
                 "status": "warning",
                 "message": "Missing required API keys",
                 "config": Config.get_dict(),
-                "features": Config.check_optional_features(),
+                "features": features,
             },
         )
 
     return {
         "status": "healthy",
         "config": Config.get_dict(),
-        "features": Config.check_optional_features(),
+        "features": features,
     }
 
 
@@ -159,6 +175,12 @@ async def process_video_task(video_request: ProcessVideoRequest, request_id: str
         }
 
         outputs = await summarization_service.process_content(content_for_summarization)
+        
+        # Check if mindmap image was generated
+        if "mindmap_image_path" in outputs:
+            logger.info(f"Mindmap image generated: {outputs['mindmap_image_path']}")
+            # Make the path relative to the output directory for proper URL construction
+            outputs["mindmap_image_url"] = f"/outputs/{os.path.basename(outputs['mindmap_image_path'])}"
 
         # Update task status to complete
         processing_tasks[request_id]["status"] = "complete"
@@ -282,12 +304,113 @@ async def get_processed_video(video_id: str):
 
     try:
         data = load_json(processed_file)
+        
+        # Check if we need to add the mindmap image URL in case of older processed files
+        if "outputs" in data and "mindmap_path" in data["outputs"]:
+            mindmap_image_path = data["outputs"]["mindmap_path"].replace(".md", ".png")
+            if os.path.exists(mindmap_image_path):
+                # Add the mindmap image URL if it exists but wasn't in the original data
+                if "mindmap_image_path" not in data["outputs"]:
+                    data["outputs"]["mindmap_image_path"] = mindmap_image_path
+                    data["outputs"]["mindmap_image_url"] = f"/outputs/{os.path.basename(mindmap_image_path)}"
+        
         return data
     except Exception as e:
         logger.error(f"Error loading processed video: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500, detail=f"Error loading video data: {str(e)}"
         )
+
+
+@app.get("/mindmap-image/{video_id}")
+async def get_mindmap_image(video_id: str):
+    """Get the mindmap image for a processed video"""
+    # Check if the SVG mindmap image exists first (preferred format)
+    mindmap_svg_path = os.path.join(Config.OUTPUT_DIR, f"{video_id}_mindmap.svg")
+    
+    # Check if the PNG mindmap image exists (fallback)
+    mindmap_png_path = os.path.join(Config.OUTPUT_DIR, f"{video_id}_mindmap.png")
+    
+    if os.path.exists(mindmap_svg_path):
+        # SVG exists, return it
+        return FileResponse(
+            mindmap_svg_path, 
+            media_type="image/svg+xml",
+            filename=f"{video_id}_mindmap.svg"
+        )
+    elif os.path.exists(mindmap_png_path):
+        # PNG exists, return it
+        return FileResponse(
+            mindmap_png_path, 
+            media_type="image/png",
+            filename=f"{video_id}_mindmap.png"
+        )
+    else:
+        # Try to generate it on-demand if the markdown file exists
+        mindmap_md_path = os.path.join(Config.OUTPUT_DIR, f"{video_id}_mindmap.md")
+        
+        if os.path.exists(mindmap_md_path):
+            try:
+                # Generate image from the markdown file
+                with open(mindmap_md_path, "r") as f:
+                    mermaid_content = f.read()
+                
+                try:
+                    import mermaid as md
+                    # Set the environment variable for mermaid.ink server
+                    os.environ["MERMAID_INK_SERVER"] = "https://mermaid.ink"
+                    
+                    # Clean mermaid content
+                    import re
+                    if "```mermaid" in mermaid_content:
+                        mermaid_match = re.search(r'```mermaid\s*(.*?)```', mermaid_content, re.DOTALL)
+                        if mermaid_match:
+                            clean_content = mermaid_match.group(1).strip()
+                        else:
+                            clean_content = mermaid_content
+                    else:
+                        clean_content = mermaid_content.strip()
+                        
+                    # Ensure content starts with mindmap if it's a mindmap
+                    if "mindmap" not in clean_content.split('\n')[0]:
+                        clean_content = "mindmap\n" + clean_content
+                    
+                    # Create diagram
+                    diagram = md.Mermaid(clean_content)
+                    
+                    # Save as SVG (preferred)
+                    svg_path = os.path.join(Config.OUTPUT_DIR, f"{video_id}_mindmap.svg")
+                    diagram.to_svg(svg_path)
+                    
+                    # Check if SVG was created successfully
+                    if os.path.exists(svg_path) and os.path.getsize(svg_path) > 0:
+                        logger.info(f"Generated SVG mindmap image on-demand: {svg_path}")
+                        return FileResponse(
+                            svg_path,
+                            media_type="image/svg+xml",
+                            filename=f"{video_id}_mindmap.svg"
+                        )
+                    else:
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Failed to generate SVG image: file not created or empty"
+                        )
+                except ImportError:
+                    raise HTTPException(
+                        status_code=501, 
+                        detail="mermaid-py is not available for image generation"
+                    )
+                except Exception as e:
+                    logger.error(f"Error generating mindmap image: {str(e)}", exc_info=True)
+                    raise HTTPException(
+                        status_code=500, 
+                        detail=f"Error generating mindmap image: {str(e)}"
+                    )
+            except Exception as e:
+                logger.error(f"Error reading mindmap markdown: {str(e)}", exc_info=True)
+                raise HTTPException(status_code=500, detail=f"Error reading mindmap markdown: {str(e)}")
+        else:
+            raise HTTPException(status_code=404, detail=f"Mindmap not found for video {video_id}")
 
 
 @app.get("/files/{file_path:path}")

@@ -23,4 +23,6 @@ requests
 aiohttp
 faiss-cpu
 matplotlib
-python-jose 
+python-jose
+genanki 
+mermaid-py 

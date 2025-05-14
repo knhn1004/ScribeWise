@@ -21,6 +21,24 @@ from langchain_community.vectorstores import FAISS
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 import markdown
+import hashlib
+
+# For Anki .apkg generation
+try:
+    import genanki
+    GENANKI_AVAILABLE = True
+except ImportError:
+    GENANKI_AVAILABLE = False
+
+# For mermaid diagram rendering
+try:
+    import mermaid as md
+    # Set the mermaid.ink server environment variable
+    os.environ["MERMAID_INK_SERVER"] = "https://mermaid.ink"
+    MERMAID_AVAILABLE = True
+except ImportError:
+    MERMAID_AVAILABLE = False
+    print("Warning: mermaid-py not available, mindmap image generation will be disabled")
 
 # Load environment variables
 load_dotenv()
@@ -127,71 +145,6 @@ class SummarizationService:
             return False
         return True
 
-    async def process_content(self, content: Dict) -> Dict[str, Any]:
-        """Process video content (transcription and optionally images) to generate all outputs"""
-        # Check if LLM is available
-        if not await self._ensure_llm():
-            return {"error": "Groq LLM not initialized (missing API key)"}
-
-        # Extract text from content
-        text = ""
-        if "text" in content and content["text"]:
-            text = content["text"]
-        elif "segments" in content and content["segments"]:
-            # Combine segments into text
-            text = " ".join(
-                [
-                    segment["text"]
-                    for segment in content["segments"]
-                    if "text" in segment
-                ]
-            )
-
-        # Check if we have valid text to process
-        if not text or len(text.strip()) < 10:  # Require at least 10 characters
-            return {
-                "error": "No valid text content found in input or text is too short"
-            }
-
-        # Prepare RAG if possible
-        vectorstore = await self.prepare_rag(text)
-
-        # Generate content directly without using @tool methods which are causing issues
-        try:
-            notes = self._generate_notes_direct(text)
-            flashcards = self._generate_flashcards_direct(text)
-            mindmap = self._generate_mindmap_direct(text)
-        except Exception as e:
-            error_msg = f"Error during content generation: {str(e)}"
-            print(error_msg)
-            return {"error": error_msg}
-
-        # Save outputs to files
-        if "video_id" in content:
-            video_id = content["video_id"]
-        else:
-            video_id = "unknown"
-
-        notes_path = f"{self.output_dir}/{video_id}_notes.md"
-        flashcards_path = f"{self.output_dir}/{video_id}_flashcards.json"
-        mindmap_path = f"{self.output_dir}/{video_id}_mindmap.md"
-
-        with open(notes_path, "w") as f:
-            f.write(notes)
-        with open(flashcards_path, "w") as f:
-            f.write(flashcards)
-        with open(mindmap_path, "w") as f:
-            f.write(mindmap)
-
-        return {
-            "notes": notes,
-            "notes_path": notes_path,
-            "flashcards": flashcards,
-            "flashcards_path": flashcards_path,
-            "mindmap": mindmap,
-            "mindmap_path": mindmap_path,
-        }
-        
     def _generate_notes_direct(self, text: str) -> str:
         """Direct version of generate_notes without @tool decorator"""
         if not self.llm:
@@ -296,7 +249,7 @@ class SummarizationService:
         # Create a prompt for generating mindmaps
         mindmap_prompt = PromptTemplate.from_template(
             """You are an expert at creating concept maps and visual representations of information.
-            Generate a structured mindmap in Mermaid format from the following content.
+            Generate a structured mindmap in Mermaid format from the following content. 
             
             CONTENT:
             {text}
@@ -306,20 +259,11 @@ class SummarizationService:
             2. Include 2-3 levels of depth depending on the content complexity
             3. Focus on relationships between concepts
             4. Keep node text concise (2-5 words per node)
-            5. Output in valid Mermaid mindmap syntax
+            5. Output ONLY valid Mermaid mindmap syntax with no extra text
+            6. Do not include explanations before or after the diagram
+            7. Do not nest mermaid code blocks
             
-            The output should start with "```mermaid" and end with "```" and use the Mermaid mindmap syntax like:
-            
-            ```mermaid
-            mindmap
-              root((Main Topic))
-                Branch 1
-                  Sub-topic 1
-                  Sub-topic 2
-                Branch 2
-                  Sub-topic 3
-                  Sub-topic 4
-            ```
+            IMPORTANT: Your output must begin with "mindmap" and contain only valid mermaid syntax.
             
             MINDMAP:"""
         )
@@ -327,19 +271,98 @@ class SummarizationService:
         # Use the modern pipe syntax
         try:
             chain = mindmap_prompt | self.llm | StrOutputParser()
-            result = chain.invoke({"text": text})
+            raw_result = chain.invoke({"text": text})
             
-            # Ensure proper mermaid format
-            if not result.startswith("```mermaid"):
-                result = "```mermaid\n" + result
-            if not result.endswith("```"):
-                result = result + "\n```"
+            # Clean up the result to ensure it's only the mermaid diagram
+            # Remove any text outside of the mermaid diagram 
+            if "```mermaid" in raw_result:
+                # Extract content between mermaid code blocks
+                import re
+                mermaid_content = re.search(r'```mermaid\s*(.*?)```', raw_result, re.DOTALL)
+                if mermaid_content:
+                    result = mermaid_content.group(1).strip()
+                    # If result doesn't start with "mindmap", add it
+                    if not result.startswith("mindmap"):
+                        result = "mindmap\n" + result
+                else:
+                    result = raw_result
+            else:
+                # If no code block markers, clean up the result
+                result = raw_result.strip()
+                # If result doesn't start with "mindmap", add it
+                if not result.startswith("mindmap"):
+                    result = "mindmap\n" + result
+            
+            # Format properly with mermaid markers
+            result = "```mermaid\n" + result + "\n```"
                 
             return result
         except Exception as e:
             error_msg = f"Error generating mindmap: {str(e)}"
             print(error_msg)
             return error_msg
+
+    def _convert_mermaid_to_image(self, mermaid_content: str, output_path: str) -> str:
+        """Convert a mermaid diagram to an image file
+        
+        Args:
+            mermaid_content: The mermaid diagram content (without code block markers)
+            output_path: The path to save the image file, without extension
+            
+        Returns:
+            The path to the generated image file, or None if failed
+        """
+        if not MERMAID_AVAILABLE:
+            print("Warning: mermaid-py not available, cannot convert diagram to image")
+            return None
+            
+        try:
+            # Clean mermaid content - remove code block markers if present
+            if "```mermaid" in mermaid_content:
+                import re
+                mermaid_match = re.search(r'```mermaid\s*(.*?)```', mermaid_content, re.DOTALL)
+                if mermaid_match:
+                    clean_content = mermaid_match.group(1).strip()
+                else:
+                    clean_content = mermaid_content
+            else:
+                clean_content = mermaid_content.strip()
+                
+            # Ensure content starts with mindmap if it's a mindmap
+            if "mindmap" not in clean_content.split('\n')[0]:
+                clean_content = "mindmap\n" + clean_content
+                
+            # Create mermaid diagram object
+            diagram = md.Mermaid(clean_content)
+            
+            # Save as SVG instead of PNG since SVG generation works correctly
+            svg_path = f"{output_path}.svg"
+            
+            try:
+                # Use the to_svg method to convert and save the diagram
+                diagram.to_svg(svg_path)
+                
+                if os.path.exists(svg_path):
+                    filesize = os.path.getsize(svg_path)
+                    if filesize > 0:
+                        print(f"Successfully generated mindmap SVG image: {svg_path} ({filesize/1024:.2f} KB)")
+                        return svg_path
+                    else:
+                        print(f"Error: Generated SVG file has zero size: {svg_path}")
+                        return None
+                else:
+                    print(f"Error: SVG file was not created at {svg_path}")
+                    return None
+                    
+            except Exception as e:
+                error_msg = f"Error saving SVG image: {str(e)}"
+                print(error_msg)
+                return None
+                
+        except Exception as e:
+            error_msg = f"Error converting mermaid to image: {str(e)}"
+            print(error_msg)
+            return None
 
     def _process_mermaid_markdown(self, content: str) -> str:
         """Process markdown content with mermaid diagrams"""
@@ -375,3 +398,166 @@ class SummarizationService:
         # This approach works because modern browsers will render the mermaid syntax
         # when using the mermaid.js library in the final HTML page
         return html_content
+        
+    def _create_anki_package(self, flashcards_json: str, deck_title: str, output_path: str) -> str:
+        """Create an Anki package (.apkg) file from flashcards JSON"""
+        if not GENANKI_AVAILABLE:
+            print("Warning: genanki package not available, skipping .apkg generation")
+            return None
+            
+        try:
+            # Parse the flashcards JSON
+            data = json.loads(flashcards_json)
+            
+            if 'flashcards' not in data:
+                print("Error: Invalid flashcards JSON format")
+                return None
+                
+            # Generate deterministic IDs based on deck title
+            title_hash = hashlib.md5(deck_title.encode('utf-8')).hexdigest()[:8]
+            model_id = int(title_hash, 16)
+            deck_id = model_id + 1  # Just ensure it's different from model_id
+            
+            # Create the model (note type)
+            model = genanki.Model(
+                model_id,
+                'ScribeWise Basic',
+                fields=[
+                    {'name': 'Question'},
+                    {'name': 'Answer'},
+                ],
+                templates=[
+                    {
+                        'name': 'Card',
+                        'qfmt': '{{Question}}',
+                        'afmt': '{{FrontSide}}<hr id="answer">{{Answer}}',
+                    },
+                ],
+                css="""
+                .card {
+                    font-family: Arial, sans-serif;
+                    font-size: 20px;
+                    text-align: left;
+                    color: black;
+                    background-color: white;
+                    padding: 20px;
+                }
+                """
+            )
+            
+            # Create the deck
+            deck = genanki.Deck(deck_id, deck_title)
+            
+            # Add cards to the deck
+            for card in data['flashcards']:
+                note = genanki.Note(
+                    model=model,
+                    fields=[card['front'], card['back']]
+                )
+                deck.add_note(note)
+                
+            # Generate the package and save it
+            package = genanki.Package(deck)
+            package.write_to_file(output_path)
+            
+            print(f"Successfully created Anki package: {output_path}")
+            return output_path
+            
+        except Exception as e:
+            print(f"Error creating Anki package: {str(e)}")
+            return None
+
+    async def process_content(self, content: Dict) -> Dict[str, Any]:
+        """Process video content (transcription and optionally images) to generate all outputs"""
+        # Check if LLM is available
+        if not await self._ensure_llm():
+            return {"error": "Groq LLM not initialized (missing API key)"}
+
+        # Extract text from content
+        text = ""
+        if "text" in content and content["text"]:
+            text = content["text"]
+        elif "segments" in content and content["segments"]:
+            # Combine segments into text
+            text = " ".join(
+                [
+                    segment["text"]
+                    for segment in content["segments"]
+                    if "text" in segment
+                ]
+            )
+
+        # Check if we have valid text to process
+        if not text or len(text.strip()) < 10:  # Require at least 10 characters
+            return {
+                "error": "No valid text content found in input or text is too short"
+            }
+
+        # Prepare RAG if possible
+        vectorstore = await self.prepare_rag(text)
+
+        # Generate content directly without using @tool methods which are causing issues
+        try:
+            notes = self._generate_notes_direct(text)
+            flashcards = self._generate_flashcards_direct(text)
+            mindmap = self._generate_mindmap_direct(text)
+        except Exception as e:
+            error_msg = f"Error during content generation: {str(e)}"
+            print(error_msg)
+            return {"error": error_msg}
+
+        # Save outputs to files
+        if "video_id" in content:
+            video_id = content["video_id"]
+        else:
+            video_id = "unknown"
+            
+        # Get title for deck name
+        if "title" in content:
+            title = content["title"]
+        else:
+            title = f"ScribeWise {video_id}"
+
+        notes_path = f"{self.output_dir}/{video_id}_notes.md"
+        flashcards_path = f"{self.output_dir}/{video_id}_flashcards.json"
+        mindmap_path = f"{self.output_dir}/{video_id}_mindmap.md"
+        anki_path = f"{self.output_dir}/{video_id}_flashcards.apkg"
+        mindmap_image_path = f"{self.output_dir}/{video_id}_mindmap"  # Extension added by convert function
+
+        with open(notes_path, "w") as f:
+            f.write(notes)
+        with open(flashcards_path, "w") as f:
+            f.write(flashcards)
+        with open(mindmap_path, "w") as f:
+            f.write(mindmap)
+            
+        # Create Anki package if possible
+        anki_result = None
+        if GENANKI_AVAILABLE:
+            anki_result = self._create_anki_package(flashcards, title, anki_path)
+            
+        # Convert mindmap to image if possible
+        mindmap_image = None
+        if MERMAID_AVAILABLE:
+            mindmap_image = self._convert_mermaid_to_image(mindmap, mindmap_image_path)
+
+        result = {
+            "notes": notes,
+            "notes_path": notes_path,
+            "flashcards": flashcards,
+            "flashcards_path": flashcards_path,
+            "mindmap": mindmap,
+            "mindmap_path": mindmap_path,
+        }
+        
+        # Add Anki path if available
+        if anki_result:
+            result["anki_path"] = anki_path
+            
+        # Add mindmap image path if available
+        if mindmap_image:
+            result["mindmap_image_path"] = mindmap_image
+            # Add a user-friendly file type in the result
+            result["mindmap_image_type"] = "svg"
+
+        return result

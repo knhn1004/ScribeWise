@@ -143,6 +143,7 @@ echo -e "\n${GREEN}Checking for generated outputs...${NC}"
 check_output() {
   local path=$1
   local desc=$2
+  local download_if_success=$3  # Set to "true" to download automatically
   
   # Try to get the file
   local response=$(curl -s -I -X GET "${API_URL}${path}" -w "%{http_code}")
@@ -150,7 +151,18 @@ check_output() {
   
   if [[ "$http_code" == "200" ]]; then
     echo -e "${GREEN}✓ ${desc} is available at: ${path}${NC}"
-    echo -e "  curl -s -X GET \"${API_URL}${path}\" > ${desc// /_}.output"
+    
+    # Build the command for downloading
+    local download_cmd="curl -s -X GET \"${API_URL}${path}\" > ${desc// /_}.${path##*.}"
+    
+    # Either show the command or execute it
+    if [[ "$download_if_success" == "true" ]]; then
+      echo -e "${BLUE}Downloading...${NC}"
+      eval $download_cmd
+      echo -e "${GREEN}Downloaded to ${desc// /_}.${path##*.}${NC}"
+    else
+      echo -e "  $download_cmd"
+    fi
   else
     echo -e "${RED}✗ ${desc} not available${NC}"
   fi
@@ -163,7 +175,19 @@ if [ -n "$OUTPUT_PATHS" ]; then
   echo -e "${GREEN}Found output paths:${NC}"
   echo "$OUTPUT_PATHS" | while IFS=: read -r key value; do
     echo -e "${GREEN}${key}: ${value}${NC}"
-    check_output "$value" "$key"
+    
+    # Auto-download Anki files but just show the command for other file types
+    if [[ "$value" == *".apkg"* ]]; then
+      check_output "$value" "$key" "true"
+    elif [[ "$value" == *"_mindmap.png"* ]] || [[ "$key" == "mindmap_image_path" ]]; then
+      # Also auto-download mindmap images
+      check_output "$value" "$key" "true"
+    elif [[ "$value" == *"_mindmap.svg"* ]]; then
+      # Also auto-download mindmap SVG files
+      check_output "$value" "$key" "true"
+    else
+      check_output "$value" "$key"
+    fi
   done
 else
   echo -e "${RED}No specific output paths found in response${NC}"
