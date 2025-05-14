@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, DragEvent, ChangeEvent } from "react";
+import { useState, useRef, DragEvent, ChangeEvent, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { 
   UploadCloud, 
@@ -10,13 +10,43 @@ import {
   CheckCircle, 
   Youtube, 
   FileText,
-  CornerRightUp
+  CornerRightUp,
+  AlertCircle
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { Progress } from "@/components/ui/progress";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+
+// API base URL - can be moved to env variable
+const API_BASE_URL = "http://localhost:8000";
+
+// Types
+interface ProcessingStatus {
+  status: string;
+  request_id: string;
+  progress?: string;
+  video_info?: any;
+  error?: string;
+  result?: any;
+  outputs?: any;
+}
+
+interface VideoInfo {
+  video_id: string;
+  title: string;
+  duration: number;
+  url: string;
+}
+
+interface PdfInfo {
+  pdf_id: string;
+  filename: string;
+  file_size: number;
+}
 
 // File Upload Types
 interface FileWithPreview {
@@ -28,6 +58,11 @@ interface FileWithPreview {
   type: string;
   lastModified?: number;
   file?: File;
+  status?: string;
+  request_id?: string;
+  pdf_id?: string;
+  results?: any;
+  error?: string;
 }
 
 // Hook for file input
@@ -148,44 +183,133 @@ function FileDisplay({ fileName, onClear }: FileDisplayProps) {
 function FileUpload() {
   const [files, setFiles] = useState<FileWithPreview[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Process dropped or selected files
   const handleFiles = (fileList: FileList) => {
-    const newFiles = Array.from(fileList).map((file) => ({
-      id: `${URL.createObjectURL(file)}-${Date.now()}`,
-      preview: URL.createObjectURL(file),
-      progress: 0,
-      name: file.name,
-      size: file.size,
-      type: file.type,
-      lastModified: file.lastModified,
-      file,
-    }));
+    // Validate file types (only accept PDFs)
+    const newFiles = Array.from(fileList)
+      .filter(file => file.type === "application/pdf")
+      .map((file) => ({
+        id: `${URL.createObjectURL(file)}-${Date.now()}`,
+        preview: URL.createObjectURL(file),
+        progress: 0,
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        lastModified: file.lastModified,
+        file,
+        status: "queued"
+      }));
+    
+    if (newFiles.length === 0) {
+      setErrorMessage("Only PDF files are supported");
+      return;
+    }
+    
     setFiles((prev) => [...prev, ...newFiles]);
-    newFiles.forEach((f) => simulateUpload(f.id));
+    
+    // Start uploading files
+    newFiles.forEach((f) => uploadFile(f));
   };
 
-  // Simulate upload progress
-  const simulateUpload = (id: string) => {
-    let progress = 0;
-    const interval = setInterval(() => {
-      progress += Math.random() * 15;
+  // Process status polling
+  const pollProcessingStatus = async (requestId: string, fileId: string) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/pdf-status/${requestId}`);
+      const data = await response.json();
+
+      // Update file status
+      setFiles((prev) =>
+        prev.map((f) => 
+          f.id === fileId 
+            ? { 
+                ...f, 
+                status: data.status,
+                progress: data.status === "complete" ? 100 : f.progress,
+                results: data.status === "complete" ? data.results : f.results,
+                error: data.error
+              } 
+            : f
+        )
+      );
+
+      // Continue polling if not complete or error
+      if (data.status !== "complete" && data.status !== "error") {
+        setTimeout(() => pollProcessingStatus(requestId, fileId), 3000);
+      }
+    } catch (error) {
+      setFiles((prev) =>
+        prev.map((f) => 
+          f.id === fileId 
+            ? { ...f, status: "error", error: "Failed to check processing status" } 
+            : f
+        )
+      );
+    }
+  };
+
+  // Upload file to API
+  const uploadFile = async (file: FileWithPreview) => {
+    if (!file.file) return;
+
+    try {
+      // Update status to uploading
+      setFiles((prev) =>
+        prev.map((f) => (f.id === file.id ? { ...f, status: "uploading", progress: 10 } : f))
+      );
+
+      // Create form data
+      const formData = new FormData();
+      formData.append("pdf_file", file.file);
+
+      // Upload file
+      const response = await fetch(`${API_BASE_URL}/process-pdf`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      // Update file with request_id and pdf_id
       setFiles((prev) =>
         prev.map((f) =>
-          f.id === id ? { ...f, progress: Math.min(progress, 100) } : f,
-        ),
+          f.id === file.id
+            ? { 
+                ...f, 
+                status: "processing", 
+                progress: 40,
+                request_id: data.request_id,
+                pdf_id: data.pdf_info.pdf_id
+              }
+            : f
+        )
       );
-      if (progress >= 100) {
-        clearInterval(interval);
-        if (navigator.vibrate) navigator.vibrate(100);
-      }
-    }, 300);
+
+      // Start polling for status
+      pollProcessingStatus(data.request_id, file.id);
+
+    } catch (error) {
+      console.error("Error uploading file:", error);
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.id === file.id
+            ? { ...f, status: "error", error: `Upload failed: ${error instanceof Error ? error.message : "Unknown error"}` }
+            : f
+        )
+      );
+    }
   };
 
   const onDrop = (e: DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
+    setErrorMessage("");
     handleFiles(e.dataTransfer.files);
   };
 
@@ -197,6 +321,7 @@ function FileUpload() {
   const onDragLeave = () => setIsDragging(false);
 
   const onSelect = (e: ChangeEvent<HTMLInputElement>) => {
+    setErrorMessage("");
     if (e.target.files) handleFiles(e.target.files);
   };
 
@@ -208,8 +333,48 @@ function FileUpload() {
     return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`;
   };
 
+  const getStatusColor = (status: string | undefined) => {
+    switch (status) {
+      case "complete":
+        return "bg-emerald-500";
+      case "error":
+        return "bg-red-500";
+      case "processing":
+      case "extracting_text":
+        return "bg-blue-500";
+      default:
+        return "bg-blue-500";
+    }
+  };
+
+  const getStatusText = (status: string | undefined) => {
+    switch (status) {
+      case "complete":
+        return "Completed";
+      case "error":
+        return "Error";
+      case "queued":
+        return "Queued";
+      case "uploading":
+        return "Uploading";
+      case "processing":
+        return "Processing";
+      case "extracting_text":
+        return "Extracting Text";
+      default:
+        return "Processing";
+    }
+  };
+
   return (
     <div className="w-full max-w-3xl mx-auto">
+      {errorMessage && (
+        <Alert className="mb-4 bg-red-500/10 border-red-500/20 text-red-500">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>{errorMessage}</AlertDescription>
+        </Alert>
+      )}
+      
       {/* Drop zone */}
       <motion.div
         onDragOver={onDragOver}
@@ -267,7 +432,7 @@ function FileUpload() {
                 ? "Drop files here"
                 : files.length
                   ? "Add more files"
-                  : "Upload PDF or TXT files"}
+                  : "Upload PDF files"}
             </h3>
             <p className="text-muted-foreground md:text-lg max-w-md mx-auto">
               {isDragging ? (
@@ -282,7 +447,7 @@ function FileUpload() {
               )}
             </p>
             <p className="text-sm text-muted-foreground">
-              Supports PDF and TXT files
+              Only PDF files are supported
             </p>
           </div>
 
@@ -292,7 +457,7 @@ function FileUpload() {
             multiple
             hidden
             onChange={onSelect}
-            accept="application/pdf,text/plain"
+            accept="application/pdf"
           />
         </div>
       </motion.div>
@@ -307,7 +472,7 @@ function FileUpload() {
               className="flex justify-between items-center mb-3 px-2"
             >
               <h3 className="font-semibold text-lg md:text-xl text-foreground">
-                Uploaded files ({files.length})
+                Files ({files.length})
               </h3>
               {files.length > 1 && (
                 <Button
@@ -341,7 +506,7 @@ function FileUpload() {
                 {/* Thumbnail */}
                 <div className="relative flex-shrink-0">
                   <FileIcon className="w-16 h-16 md:w-20 md:h-20 text-muted-foreground" />
-                  {file.progress === 100 && (
+                  {file.status === "complete" && (
                     <motion.div
                       initial={{ opacity: 0, scale: 0.5 }}
                       animate={{ opacity: 1, scale: 1 }}
@@ -366,28 +531,21 @@ function FileUpload() {
                       </h4>
                     </div>
 
-                    {/* Details & remove/loading */}
+                    {/* Status */}
                     <div className="flex items-center justify-between gap-3 text-sm text-muted-foreground">
-                      <span className="text-xs md:text-sm">
-                        {formatFileSize(file.size)}
+                      <span className="text-xs md:text-sm flex items-center gap-2">
+                        <span>{formatFileSize(file.size)}</span>
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-secondary">
+                          {getStatusText(file.status)}
+                        </span>
                       </span>
                       <span className="flex items-center gap-1.5">
-                        <span className="font-medium">
-                          {Math.round(file.progress)}%
-                        </span>
-                        {file.progress < 100 ? (
+                        {file.status === "error" ? (
+                          <span className="text-red-500">{file.error || "Error"}</span>
+                        ) : file.status !== "complete" ? (
                           <Loader className="w-4 h-4 animate-spin text-blue-500" />
                         ) : (
-                          <Trash2
-                            className="w-4 h-4 cursor-pointer text-muted-foreground hover:text-red-500 transition-colors duration-200"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setFiles((prev) =>
-                                prev.filter((f) => f.id !== file.id),
-                              );
-                            }}
-                            aria-label="Remove file"
-                          />
+                          <span className="text-emerald-500">Done</span>
                         )}
                       </span>
                     </div>
@@ -406,10 +564,26 @@ function FileUpload() {
                       }}
                       className={cn(
                         "h-full rounded-full shadow-inner",
-                        file.progress < 100 ? "bg-blue-500" : "bg-emerald-500",
+                        getStatusColor(file.status)
                       )}
                     />
                   </div>
+
+                  {/* Results links when complete */}
+                  {file.status === "complete" && file.pdf_id && (
+                    <div className="mt-3 pt-3 border-t border-border">
+                      <h5 className="font-medium text-sm mb-2">Results:</h5>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => window.location.href = `/outputs/${file.pdf_id}?type=pdf`}
+                        >
+                          View All Outputs
+                        </Button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </motion.div>
             ))}
@@ -425,8 +599,13 @@ function YouTubeInput() {
   const [url, setUrl] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [requestId, setRequestId] = useState<string | null>(null);
+  const [videoId, setVideoId] = useState<string | null>(null);
+  const [processingStatus, setProcessingStatus] = useState<ProcessingStatus | null>(null);
+  const [results, setResults] = useState<any | null>(null);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  // Submit YouTube URL for processing
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
     // Basic YouTube URL validation
@@ -440,12 +619,109 @@ function YouTubeInput() {
     setError("");
     setIsSubmitting(true);
     
-    // Simulate processing
-    setTimeout(() => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/process`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ url }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      setRequestId(data.request_id);
+      setProcessingStatus({
+        status: data.status,
+        request_id: data.request_id,
+      });
+
+      // Start polling for status
+      pollProcessingStatus(data.request_id);
+    } catch (error) {
+      console.error("Error submitting YouTube URL:", error);
+      setError(`Failed to process video: ${error instanceof Error ? error.message : "Unknown error"}`);
       setIsSubmitting(false);
-      setUrl("");
-      // Here you would normally handle the successful submission
-    }, 1500);
+    }
+  };
+
+  // Poll for processing status
+  const pollProcessingStatus = async (reqId: string) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/status/${reqId}`);
+      const data = await response.json();
+
+      setProcessingStatus(data);
+      setIsSubmitting(false);
+
+      // Extract video_id if complete
+      if (data.status === "complete") {
+        if (data.result && data.result.video_info && data.result.video_info.video_id) {
+          setVideoId(data.result.video_info.video_id);
+          setResults(data.result);
+        } else if (data.video_info && data.video_info.video_id) {
+          setVideoId(data.video_info.video_id);
+          // Get full results
+          fetchVideoResults(data.video_info.video_id);
+        }
+      } else if (data.status !== "error") {
+        // Continue polling if not complete
+        setTimeout(() => pollProcessingStatus(reqId), 3000);
+      }
+    } catch (error) {
+      console.error("Error checking processing status:", error);
+      setError(`Failed to check processing status: ${error instanceof Error ? error.message : "Unknown error"}`);
+      setIsSubmitting(false);
+    }
+  };
+
+  // Fetch video results
+  const fetchVideoResults = async (vidId: string) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/videos/${vidId}`);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const data = await response.json();
+      setResults(data);
+    } catch (error) {
+      console.error("Error fetching video results:", error);
+      setError(`Failed to fetch results: ${error instanceof Error ? error.message : "Unknown error"}`);
+    }
+  };
+
+  // Get progress percentage based on status
+  const getProgressPercentage = () => {
+    if (!processingStatus) return 0;
+    
+    switch (processingStatus.status) {
+      case "queued":
+        return 10;
+      case "downloading":
+        return 30;
+      case "transcribing":
+        return 50;
+      case "summarizing":
+        return 80;
+      case "complete":
+        return 100;
+      default:
+        return 0;
+    }
+  };
+
+  // Reset form
+  const handleReset = () => {
+    setUrl("");
+    setRequestId(null);
+    setVideoId(null);
+    setProcessingStatus(null);
+    setResults(null);
+    setError("");
+    setIsSubmitting(false);
   };
 
   return (
@@ -464,44 +740,104 @@ function YouTubeInput() {
         </div>
       </div>
 
-      <form onSubmit={handleSubmit} className="space-y-4">
-        <div className="relative">
-          <Input
-            type="url"
-            placeholder="https://www.youtube.com/watch?v=..."
-            value={url}
-            onChange={(e) => {
-              setUrl(e.target.value);
-              if (error) setError("");
-            }}
-            className={cn(
-              "pr-24",
-              error && "border-red-500 focus-visible:ring-red-500"
-            )}
-          />
-          <Button 
-            type="submit" 
-            size="sm" 
-            className="absolute right-1 top-1"
-            disabled={!url || isSubmitting}
-          >
-            {isSubmitting ? (
-              <Loader className="w-4 h-4 animate-spin" />
-            ) : (
-              "Analyze"
-            )}
-          </Button>
-        </div>
-        {error && (
-          <p className="text-red-500 text-sm">{error}</p>
-        )}
-      </form>
+      {error && (
+        <Alert className="mb-4 bg-red-500/10 border-red-500/20 text-red-500">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
 
-      <div className="mt-8 p-6 border border-dashed rounded-lg border-muted-foreground/30 text-center">
-        <p className="text-muted-foreground">
-          Your analyzed YouTube content will appear here
-        </p>
-      </div>
+      {!processingStatus ? (
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="relative">
+            <Input
+              type="url"
+              placeholder="https://www.youtube.com/watch?v=..."
+              value={url}
+              onChange={(e) => {
+                setUrl(e.target.value);
+                if (error) setError("");
+              }}
+              className={cn(
+                "pr-24",
+                error && "border-red-500 focus-visible:ring-red-500"
+              )}
+            />
+            <Button 
+              type="submit" 
+              size="sm" 
+              className="absolute right-1 top-1"
+              disabled={!url || isSubmitting}
+            >
+              {isSubmitting ? (
+                <Loader className="w-4 h-4 animate-spin" />
+              ) : (
+                "Analyze"
+              )}
+            </Button>
+          </div>
+        </form>
+      ) : (
+        <div className="space-y-4">
+          {/* Processing status */}
+          <Card className="p-4 bg-secondary/30">
+            <div className="space-y-3">
+              <div className="flex justify-between items-center">
+                <h5 className="font-medium">Processing Status: {processingStatus.status}</h5>
+                {processingStatus.status !== "complete" && (
+                  <Loader className="w-4 h-4 animate-spin text-blue-500" />
+                )}
+                {processingStatus.status === "complete" && (
+                  <CheckCircle className="w-4 h-4 text-emerald-500" />
+                )}
+              </div>
+              
+              <Progress value={getProgressPercentage()} className="h-2" />
+              
+              {processingStatus.video_info && (
+                <div className="pt-2 text-sm">
+                  <p className="font-medium">{processingStatus.video_info.title}</p>
+                </div>
+              )}
+            </div>
+          </Card>
+
+          {/* Results display */}
+          {processingStatus.status === "complete" && results && (
+            <div className="space-y-4 mt-6">
+              <div className="flex justify-between items-center">
+                <h4 className="text-lg font-medium">Analysis Results</h4>
+                <Button variant="outline" size="sm" onClick={handleReset}>
+                  Analyze Another Video
+                </Button>
+              </div>
+
+              <Card className="p-4">
+                <div className="space-y-3">
+                  <h5 className="font-medium text-lg">{results.video_info?.title}</h5>
+                  
+                  {/* Results links */}
+                  <div className="flex justify-center mt-4">
+                    <Button
+                      onClick={() => window.location.href = `/outputs/${results.video_info?.video_id}?type=video`}
+                    >
+                      View All Outputs
+                    </Button>
+                  </div>
+                </div>
+              </Card>
+            </div>
+          )}
+        </div>
+      )}
+
+      {!processingStatus && (
+        <div className="mt-8 p-6 border border-dashed rounded-lg border-muted-foreground/30 text-center">
+          <p className="text-muted-foreground">
+            Your analyzed YouTube content will appear here
+          </p>
+        </div>
+      )}
     </div>
   );
 }
@@ -512,10 +848,10 @@ function Dashboard() {
     <div className="container mx-auto py-8 px-4 max-w-6xl">
       <div className="text-center mb-10">
         <h1 className="text-3xl md:text-4xl font-bold mb-3 text-foreground">
-          Content Analysis Dashboard
+          ScribeWise Content Analysis
         </h1>
         <p className="text-muted-foreground max-w-2xl mx-auto">
-          Upload a PDF/TXT file or enter a YouTube URL to analyze content and get insights
+          Upload a PDF file or enter a YouTube URL to analyze content and generate summaries, notes, flashcards, and mindmaps
         </p>
       </div>
 
@@ -529,7 +865,7 @@ function Dashboard() {
         <CardContent>
           <Tabs defaultValue="file" className="w-full">
             <TabsList className="grid w-full grid-cols-2 mb-8">
-              <TabsTrigger value="file">Upload File</TabsTrigger>
+              <TabsTrigger value="file">Upload PDF</TabsTrigger>
               <TabsTrigger value="youtube">YouTube URL</TabsTrigger>
             </TabsList>
             <TabsContent value="file">
@@ -541,17 +877,6 @@ function Dashboard() {
           </Tabs>
         </CardContent>
       </Card>
-
-      <div className="mt-12 text-center">
-        <h2 className="text-xl font-semibold mb-2 text-foreground">Need Help?</h2>
-        <p className="text-muted-foreground">
-          If you have any questions or need assistance, please check our documentation or contact support.
-        </p>
-        <div className="flex justify-center gap-4 mt-4">
-          <Button variant="outline">Documentation</Button>
-          <Button variant="outline">Contact Support</Button>
-        </div>
-      </div>
     </div>
   );
 }

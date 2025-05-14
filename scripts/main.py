@@ -5,7 +5,16 @@ ScribeWise Backend Server
 
 import os
 import asyncio
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Request, UploadFile, File, Form
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    BackgroundTasks,
+    Depends,
+    Request,
+    UploadFile,
+    File,
+    Form,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -85,6 +94,7 @@ except ImportError:
 # Check if PyMuPDF is available
 try:
     import fitz
+
     logger.info("PyMuPDF is available - PDF processing is enabled")
 except ImportError:
     logger.warning("PyMuPDF is not available - PDF processing is disabled")
@@ -485,18 +495,18 @@ async def process_pdf_task(pdf_path: str, pdf_id: str, request_id: str):
     try:
         # Update task status
         pdf_processing_tasks[request_id]["status"] = "extracting_text"
-        
+
         # Process the PDF
         results = await pdf_service.process_pdf(pdf_path, summarization_service)
-        
+
         # Update task status to complete
         pdf_processing_tasks[request_id]["status"] = "complete"
         pdf_processing_tasks[request_id]["results"] = results
-        
+
         # Save the processed result to disk for later retrieval
         processed_file = os.path.join(PROCESSED_PDF_DIR, f"{pdf_id}.json")
         save_json(results, processed_file)
-        
+
     except Exception as e:
         logger.error(f"Error processing PDF: {str(e)}", exc_info=True)
         pdf_processing_tasks[request_id]["status"] = "error"
@@ -519,30 +529,28 @@ async def process_pdf(
     """
     # Create a unique request ID
     import uuid
+
     request_id = str(uuid.uuid4())
-    
+
     try:
         # Read uploaded file content
         file_content = await pdf_file.read()
-        
+
         # Save the uploaded PDF
         pdf_info = await pdf_service.save_uploaded_pdf(file_content, pdf_file.filename)
-        
+
         # Initialize task entry
         pdf_processing_tasks[request_id] = {
             "status": "queued",
             "pdf_info": pdf_info,
             "created_at": asyncio.get_event_loop().time(),
         }
-        
+
         # Start processing in the background
         background_tasks.add_task(
-            process_pdf_task, 
-            pdf_info["pdf_path"], 
-            pdf_info["pdf_id"], 
-            request_id
+            process_pdf_task, pdf_info["pdf_path"], pdf_info["pdf_id"], request_id
         )
-        
+
         # Return the task ID for status checking
         return {
             "request_id": request_id,
@@ -555,13 +563,10 @@ async def process_pdf(
             },
             "model": Config.LLM_MODEL,
         }
-        
+
     except Exception as e:
         logger.error(f"Error handling PDF upload: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Error processing PDF: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
 
 
 @app.get("/pdf-status/{request_id}")
@@ -602,9 +607,7 @@ async def get_processed_pdf(pdf_id: str):
         return data
     except Exception as e:
         logger.error(f"Error loading processed PDF: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500, detail=f"Error loading PDF data: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Error loading PDF data: {str(e)}")
 
 
 @app.get("/pdf-mindmap-image/{pdf_id}")
@@ -623,7 +626,7 @@ async def get_pdf_mindmap_image(pdf_id: str):
     else:
         # Check if the markdown file exists and try to generate image
         mindmap_md_path = os.path.join(pdf_dir, f"{pdf_id}_mindmap.md")
-        
+
         if os.path.exists(mindmap_md_path):
             try:
                 # Generate image from the markdown file if mermaid is available
@@ -632,15 +635,14 @@ async def get_pdf_mindmap_image(pdf_id: str):
                         status_code=501,
                         detail="mermaid-py is not available for image generation",
                     )
-                    
+
                 with open(mindmap_md_path, "r") as f:
                     mermaid_content = f.read()
-                    
+
                 image_path = summarization_service._convert_mermaid_to_image(
-                    mermaid_content, 
-                    os.path.join(pdf_dir, f"{pdf_id}_mindmap")
+                    mermaid_content, os.path.join(pdf_dir, f"{pdf_id}_mindmap")
                 )
-                
+
                 if image_path and os.path.exists(image_path):
                     return FileResponse(
                         image_path,
@@ -653,15 +655,15 @@ async def get_pdf_mindmap_image(pdf_id: str):
                         detail="Failed to generate mindmap image",
                     )
             except Exception as e:
-                logger.error(f"Error generating PDF mindmap image: {str(e)}", exc_info=True)
+                logger.error(
+                    f"Error generating PDF mindmap image: {str(e)}", exc_info=True
+                )
                 raise HTTPException(
-                    status_code=500, 
-                    detail=f"Error generating mindmap image: {str(e)}"
+                    status_code=500, detail=f"Error generating mindmap image: {str(e)}"
                 )
         else:
             raise HTTPException(
-                status_code=404, 
-                detail=f"Mindmap not found for PDF {pdf_id}"
+                status_code=404, detail=f"Mindmap not found for PDF {pdf_id}"
             )
 
 

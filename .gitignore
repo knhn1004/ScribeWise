@@ -234,4 +234,4 @@ torch_cache/
 downloads/
 
 # outputs
-outputs/
+scripts/outputs/
