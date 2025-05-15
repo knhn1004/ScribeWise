@@ -201,62 +201,35 @@ async def process_video_task(video_request: ProcessVideoRequest, request_id: str
             "title": video_result["video_info"]["title"],
         }
 
-        outputs = await summarization_service.process_content(content_for_summarization)
-
-        # Check if mindmap image was generated
-        if "mindmap_image_path" in outputs:
-            logger.info(f"Mindmap image generated: {outputs['mindmap_image_path']}")
-            # Make the path relative to the output directory for proper URL construction
-            outputs["mindmap_image_url"] = (
-                f"/outputs/{os.path.basename(outputs['mindmap_image_path'])}"
-            )
-
-        # Update task status to complete
-        processing_tasks[request_id]["status"] = "complete"
-        processing_tasks[request_id]["outputs"] = outputs
-
-        # Create response data
-        video_info = VideoInfo(
-            video_id=video_result["video_info"]["video_id"],
-            title=video_result["video_info"]["title"],
-            duration=video_result["video_info"]["duration"],
-            url=video_request.url,
+        summarization_result = await summarization_service.process_content(
+            content_for_summarization
         )
 
-        response_data = {
-            "video_info": video_info.dict(),
-            "scenes": [
-                {
-                    "scene_idx": i,
-                    "start_time": time,
-                    "frame_path": frame,
-                    "ocr_text": None,  # OCR would be implemented in a more complete version
-                }
-                for i, (time, frame) in enumerate(
-                    zip(video_result["scene_times"], video_result["key_frames"])
-                )
-            ],
+        # Step 4: Save the complete processed result
+        complete_result = {
+            **video_result,
             "transcription": transcription_result,
-            "outputs": outputs,
+            "outputs": summarization_result,
             "status": "success",
             "models": {
                 "text_model": Config.LLM_MODEL,
-                "speech_model": transcription_result.get("model", Config.STT_MODEL),
+                "speech_model": Config.STT_MODEL,
             },
         }
 
-        # Save the processed result to disk for later retrieval
-        processed_file = os.path.join(
-            PROCESSED_DIR, f"{video_result['video_info']['video_id']}.json"
-        )
-        save_json(response_data, processed_file)
+        video_id = video_result["video_info"]["video_id"]
+        output_path = os.path.join(PROCESSED_DIR, f"{video_id}.json")
+        save_json(complete_result, output_path)
 
-        # Update the task data one last time
-        processing_tasks[request_id]["result"] = response_data
+        processing_tasks[request_id]["status"] = "completed"
+        processing_tasks[request_id]["video_id"] = video_id
+        processing_tasks[request_id]["outputs"] = summarization_result
+
+        logger.info(f"Video processing completed for {video_id}")
 
     except Exception as e:
-        logger.error(f"Error processing video: {str(e)}", exc_info=True)
-        processing_tasks[request_id]["status"] = "error"
+        logger.error(f"Error during video processing: {str(e)}")
+        processing_tasks[request_id]["status"] = "failed"
         processing_tasks[request_id]["error"] = str(e)
 
 
@@ -266,57 +239,41 @@ async def process_video(
     background_tasks: BackgroundTasks,
     _: Dict = Depends(validate_api_keys),
 ):
-    """
-    Process a video:
-    1. Download and analyze video scenes
-    2. Transcribe the video
-    3. Generate summaries, flashcards, and mindmaps
-    """
-    # Create a unique request ID
-    import uuid
+    """Process a video URL, extract frames, generate transcript, and create summaries"""
+    request_id = os.urandom(8).hex()
 
-    request_id = str(uuid.uuid4())
-
-    # Initialize task entry
     processing_tasks[request_id] = {
-        "status": "queued",
+        "status": "initializing",
         "request": video_request.dict(),
         "created_at": asyncio.get_event_loop().time(),
     }
 
-    # Start processing in the background
     background_tasks.add_task(process_video_task, video_request, request_id)
 
-    # Return the task ID for status checking
     return {
-        "request_id": request_id,
-        "status": "queued",
+        "status": "processing",
         "message": "Video processing started",
-        "models": {"text_model": Config.LLM_MODEL, "speech_model": Config.STT_MODEL},
+        "request_id": request_id,
     }
 
 
 @app.get("/status/{request_id}")
 async def get_processing_status(request_id: str):
-    """Get the status of a processing request"""
+    """Get the status of a video processing request"""
     if request_id not in processing_tasks:
-        raise HTTPException(
-            status_code=404, detail=f"Request ID {request_id} not found"
-        )
+        raise HTTPException(status_code=404, detail="Request ID not found")
 
     task = processing_tasks[request_id]
-    response = {"request_id": request_id, "status": task["status"]}
+    response = {
+        "status": task["status"],
+        "created_at": task["created_at"],
+    }
 
-    # Include more details based on status
-    if task["status"] == "complete":
-        if "result" in task:
-            response["result"] = task["result"]
-        elif "outputs" in task:
-            response["outputs"] = task["outputs"]
-    elif task["status"] == "error":
-        response["error"] = task.get("error", "Unknown error")
+    if task["status"] == "completed":
+        response["video_id"] = task["video_id"]
+    elif task["status"] == "failed":
+        response["error"] = task["error"]
     elif task["status"] in ["downloading", "transcribing", "summarizing"]:
-        response["progress"] = task["status"]
         if "video_info" in task:
             response["video_info"] = task["video_info"]
 
@@ -326,28 +283,16 @@ async def get_processing_status(request_id: str):
 @app.get("/videos/{video_id}")
 async def get_processed_video(video_id: str):
     """Get a processed video by ID"""
-    processed_file = os.path.join(PROCESSED_DIR, f"{video_id}.json")
+    output_path = os.path.join(PROCESSED_DIR, f"{video_id}.json")
 
-    if not os.path.exists(processed_file):
-        raise HTTPException(status_code=404, detail=f"Video {video_id} not found")
+    if not os.path.exists(output_path):
+        raise HTTPException(status_code=404, detail="Video not found")
 
     try:
-        data = load_json(processed_file)
-
-        # Check if we need to add the mindmap image URL in case of older processed files
-        if "outputs" in data and "mindmap_path" in data["outputs"]:
-            mindmap_image_path = data["outputs"]["mindmap_path"].replace(".md", ".png")
-            if os.path.exists(mindmap_image_path):
-                # Add the mindmap image URL if it exists but wasn't in the original data
-                if "mindmap_image_path" not in data["outputs"]:
-                    data["outputs"]["mindmap_image_path"] = mindmap_image_path
-                    data["outputs"][
-                        "mindmap_image_url"
-                    ] = f"/outputs/{os.path.basename(mindmap_image_path)}"
-
-        return data
+        result = load_json(output_path)
+        return result
     except Exception as e:
-        logger.error(f"Error loading processed video: {str(e)}", exc_info=True)
+        logger.error(f"Error loading video data: {str(e)}")
         raise HTTPException(
             status_code=500, detail=f"Error loading video data: {str(e)}"
         )
@@ -356,160 +301,152 @@ async def get_processed_video(video_id: str):
 @app.get("/mindmap-image/{video_id}")
 async def get_mindmap_image(video_id: str):
     """Get the mindmap image for a processed video"""
-    # Check if the SVG mindmap image exists first (preferred format)
-    mindmap_svg_path = os.path.join(Config.OUTPUT_DIR, f"{video_id}_mindmap.svg")
+    output_path = os.path.join(PROCESSED_DIR, f"{video_id}.json")
 
-    # Check if the PNG mindmap image exists (fallback)
-    mindmap_png_path = os.path.join(Config.OUTPUT_DIR, f"{video_id}_mindmap.png")
+    if not os.path.exists(output_path):
+        raise HTTPException(status_code=404, detail="Video not found")
 
-    if os.path.exists(mindmap_svg_path):
-        # SVG exists, return it
-        return FileResponse(
-            mindmap_svg_path,
-            media_type="image/svg+xml",
-            filename=f"{video_id}_mindmap.svg",
-        )
-    elif os.path.exists(mindmap_png_path):
-        # PNG exists, return it
-        return FileResponse(
-            mindmap_png_path, media_type="image/png", filename=f"{video_id}_mindmap.png"
-        )
-    else:
-        # Try to generate it on-demand if the markdown file exists
-        mindmap_md_path = os.path.join(Config.OUTPUT_DIR, f"{video_id}_mindmap.md")
+    try:
+        result = load_json(output_path)
 
-        if os.path.exists(mindmap_md_path):
-            try:
-                # Generate image from the markdown file
-                with open(mindmap_md_path, "r") as f:
-                    mermaid_content = f.read()
+        if (
+            "outputs" in result
+            and "mindmap_image_path" in result["outputs"]
+            and "mindmap_image_type" in result["outputs"]
+        ):
+            image_path = result["outputs"]["mindmap_image_path"]
+            image_type = result["outputs"]["mindmap_image_type"]
 
-                try:
-                    import mermaid as md
+            if os.path.exists(image_path):
+                content_type = (
+                    "image/svg+xml" if image_type == "svg" else f"image/{image_type}"
+                )
 
-                    # Set the environment variable for mermaid.ink server
-                    os.environ["MERMAID_INK_SERVER"] = "https://mermaid.ink"
-
-                    # Clean mermaid content
-                    import re
-
-                    if "```mermaid" in mermaid_content:
-                        mermaid_match = re.search(
-                            r"```mermaid\s*(.*?)```", mermaid_content, re.DOTALL
-                        )
-                        if mermaid_match:
-                            clean_content = mermaid_match.group(1).strip()
-                        else:
-                            clean_content = mermaid_content
-                    else:
-                        clean_content = mermaid_content.strip()
-
-                    # Ensure content starts with mindmap if it's a mindmap
-                    if "mindmap" not in clean_content.split("\n")[0]:
-                        clean_content = "mindmap\n" + clean_content
-
-                    # Create diagram
-                    diagram = md.Mermaid(clean_content)
-
-                    # Save as SVG (preferred)
-                    svg_path = os.path.join(
-                        Config.OUTPUT_DIR, f"{video_id}_mindmap.svg"
-                    )
-                    diagram.to_svg(svg_path)
-
-                    # Check if SVG was created successfully
-                    if os.path.exists(svg_path) and os.path.getsize(svg_path) > 0:
-                        logger.info(
-                            f"Generated SVG mindmap image on-demand: {svg_path}"
-                        )
-                        return FileResponse(
-                            svg_path,
-                            media_type="image/svg+xml",
-                            filename=f"{video_id}_mindmap.svg",
-                        )
-                    else:
-                        raise HTTPException(
-                            status_code=500,
-                            detail=f"Failed to generate SVG image: file not created or empty",
-                        )
-                except ImportError:
-                    raise HTTPException(
-                        status_code=501,
-                        detail="mermaid-py is not available for image generation",
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"Error generating mindmap image: {str(e)}", exc_info=True
-                    )
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"Error generating mindmap image: {str(e)}",
-                    )
-            except Exception as e:
-                logger.error(f"Error reading mindmap markdown: {str(e)}", exc_info=True)
+                return FileResponse(
+                    image_path,
+                    media_type=content_type,
+                    filename=f"{video_id}_mindmap.{image_type}",
+                )
+            else:
                 raise HTTPException(
-                    status_code=500, detail=f"Error reading mindmap markdown: {str(e)}"
+                    status_code=404, detail="Mindmap image file not found"
                 )
         else:
             raise HTTPException(
-                status_code=404, detail=f"Mindmap not found for video {video_id}"
+                status_code=404, detail="No mindmap image available for this video"
             )
+    except Exception as e:
+        logger.error(f"Error getting mindmap image: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error getting mindmap image: {str(e)}"
+        )
+
+
+@app.get("/all-videos")
+async def get_all_processed_videos():
+    """Get a list of all processed videos"""
+    try:
+        videos = []
+        for filename in os.listdir(PROCESSED_DIR):
+            if filename.endswith(".json"):
+                file_path = os.path.join(PROCESSED_DIR, filename)
+                try:
+                    data = load_json(file_path)
+                    if "video_info" in data:
+                        videos.append(
+                            {
+                                "video_id": data["video_info"]["video_id"],
+                                "title": data["video_info"].get("title", "Untitled"),
+                                "duration": data["video_info"].get("duration", 0),
+                                "processed_date": os.path.getmtime(file_path),
+                            }
+                        )
+                except Exception as e:
+                    logger.error(f"Error loading video data from {filename}: {str(e)}")
+                    continue
+
+        videos.sort(key=lambda x: x["processed_date"], reverse=True)
+
+        return {
+            "status": "success",
+            "count": len(videos),
+            "videos": videos,
+        }
+    except Exception as e:
+        logger.error(f"Error getting all videos: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error getting all videos: {str(e)}"
+        )
 
 
 @app.get("/files/{file_path:path}")
 async def get_file(file_path: str):
     """Get a file from the output directory"""
     full_path = os.path.join(Config.OUTPUT_DIR, file_path)
-
-    if not os.path.exists(full_path):
-        raise HTTPException(status_code=404, detail=f"File {file_path} not found")
-
+    if not os.path.isfile(full_path):
+        raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(full_path)
 
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
-    """Handle HTTP exceptions with the ErrorResponse model"""
+    """Handle HTTP exceptions"""
     return JSONResponse(
         status_code=exc.status_code,
-        content=ErrorResponse(
-            status="error", error=exc.detail, details=exc.headers
-        ).dict(),
+        content={"status": "error", "message": exc.detail},
     )
 
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
-    """Handle general exceptions with the ErrorResponse model"""
-    logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
+    """Handle general exceptions"""
+    logger.error(f"Unhandled exception: {str(exc)}")
     return JSONResponse(
         status_code=500,
-        content=ErrorResponse(
-            status="error", error="Internal server error", details={"message": str(exc)}
-        ).dict(),
+        content={"status": "error", "message": f"Internal server error: {str(exc)}"},
     )
 
 
 async def process_pdf_task(pdf_path: str, pdf_id: str, request_id: str):
-    """Background task to process a PDF file"""
+    """Background task to process a PDF"""
     try:
-        # Update task status
-        pdf_processing_tasks[request_id]["status"] = "extracting_text"
+        pdf_processing_tasks[request_id]["status"] = "extracting"
 
-        # Process the PDF
-        results = await pdf_service.process_pdf(pdf_path, summarization_service)
+        extraction_result = await pdf_service.extract_text(pdf_path, pdf_id)
 
-        # Update task status to complete
-        pdf_processing_tasks[request_id]["status"] = "complete"
-        pdf_processing_tasks[request_id]["results"] = results
+        pdf_processing_tasks[request_id]["status"] = "summarizing"
 
-        # Save the processed result to disk for later retrieval
-        processed_file = os.path.join(PROCESSED_PDF_DIR, f"{pdf_id}.json")
-        save_json(results, processed_file)
+        content_for_summarization = {
+            "text": extraction_result["text"],
+            "pdf_id": pdf_id,
+            "title": extraction_result.get("title", f"PDF {pdf_id}"),
+        }
+
+        mindmap_result = await summarization_service.process_content_for_mindmap(
+            content_for_summarization
+        )
+
+        complete_result = {
+            **extraction_result,
+            "outputs": mindmap_result,
+            "status": "success",
+            "models": {
+                "text_model": Config.LLM_MODEL,
+            },
+        }
+
+        output_path = os.path.join(PROCESSED_PDF_DIR, f"{pdf_id}.json")
+        save_json(complete_result, output_path)
+
+        pdf_processing_tasks[request_id]["status"] = "completed"
+        pdf_processing_tasks[request_id]["pdf_id"] = pdf_id
+        pdf_processing_tasks[request_id]["outputs"] = mindmap_result
+
+        logger.info(f"PDF processing completed for {pdf_id}")
 
     except Exception as e:
-        logger.error(f"Error processing PDF: {str(e)}", exc_info=True)
-        pdf_processing_tasks[request_id]["status"] = "error"
+        logger.error(f"Error during PDF processing: {str(e)}")
+        pdf_processing_tasks[request_id]["status"] = "failed"
         pdf_processing_tasks[request_id]["error"] = str(e)
 
 
@@ -519,77 +456,68 @@ async def process_pdf(
     pdf_file: UploadFile = File(...),
     _: Dict = Depends(validate_api_keys),
 ):
-    """
-    Process a PDF file:
-    1. Extract text from PDF
-    2. Generate mindmap from entire document
-    3. Split text into chunks
-    4. Generate notes and flashcards for each chunk
-    5. Combine results
-    """
-    # Create a unique request ID
-    import uuid
-
-    request_id = str(uuid.uuid4())
-
+    """Process a PDF file, extract text, and create summaries"""
     try:
-        # Read uploaded file content
-        file_content = await pdf_file.read()
-
-        # Save the uploaded PDF
-        pdf_info = await pdf_service.save_uploaded_pdf(file_content, pdf_file.filename)
-
-        # Initialize task entry
-        pdf_processing_tasks[request_id] = {
-            "status": "queued",
-            "pdf_info": pdf_info,
-            "created_at": asyncio.get_event_loop().time(),
-        }
-
-        # Start processing in the background
-        background_tasks.add_task(
-            process_pdf_task, pdf_info["pdf_path"], pdf_info["pdf_id"], request_id
+        import fitz
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="PDF processing is not available. PyMuPDF is required.",
         )
 
-        # Return the task ID for status checking
+    request_id = os.urandom(8).hex()
+    pdf_id = os.urandom(8).hex()
+
+    pdf_processing_tasks[request_id] = {
+        "status": "initializing",
+        "filename": pdf_file.filename,
+        "created_at": asyncio.get_event_loop().time(),
+    }
+
+    try:
+        os.makedirs(Config.DOWNLOAD_DIR, exist_ok=True)
+        pdf_path = os.path.join(Config.DOWNLOAD_DIR, f"{pdf_id}.pdf")
+
+        contents = await pdf_file.read()
+        with open(pdf_path, "wb") as f:
+            f.write(contents)
+
+        pdf_processing_tasks[request_id]["status"] = "uploaded"
+        pdf_processing_tasks[request_id]["pdf_path"] = pdf_path
+
+        background_tasks.add_task(process_pdf_task, pdf_path, pdf_id, request_id)
+
         return {
-            "request_id": request_id,
-            "status": "queued",
+            "status": "processing",
             "message": "PDF processing started",
-            "pdf_info": {
-                "pdf_id": pdf_info["pdf_id"],
-                "filename": pdf_info["filename"],
-                "file_size": pdf_info["file_size"],
-            },
-            "model": Config.LLM_MODEL,
+            "request_id": request_id,
+            "pdf_id": pdf_id,
         }
 
     except Exception as e:
-        logger.error(f"Error handling PDF upload: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
+        logger.error(f"Error uploading PDF: {str(e)}")
+        pdf_processing_tasks[request_id]["status"] = "failed"
+        pdf_processing_tasks[request_id]["error"] = str(e)
+        raise HTTPException(status_code=500, detail=f"Error uploading PDF: {str(e)}")
 
 
 @app.get("/pdf-status/{request_id}")
 async def get_pdf_processing_status(request_id: str):
     """Get the status of a PDF processing request"""
     if request_id not in pdf_processing_tasks:
-        raise HTTPException(
-            status_code=404, detail=f"PDF request ID {request_id} not found"
-        )
+        raise HTTPException(status_code=404, detail="Request ID not found")
 
     task = pdf_processing_tasks[request_id]
-    response = {"request_id": request_id, "status": task["status"]}
+    response = {
+        "status": task["status"],
+        "created_at": task["created_at"],
+        "filename": task.get("filename", "Unknown"),
+    }
 
-    # Include more details based on status
-    if task["status"] == "complete":
-        if "results" in task:
-            response["results"] = task["results"]
-    elif task["status"] == "error":
-        response["error"] = task.get("error", "Unknown error")
-    elif task["status"] in ["extracting_text", "processing_chunks"]:
-        response["progress"] = task["status"]
-        if "pdf_info" in task:
-            response["pdf_info"] = task["pdf_info"]
+    if task["status"] == "completed":
+        response["pdf_id"] = task["pdf_id"]
+    elif task["status"] == "failed":
+        response["error"] = task["error"]
 
     return response
 
@@ -597,78 +525,98 @@ async def get_pdf_processing_status(request_id: str):
 @app.get("/pdfs/{pdf_id}")
 async def get_processed_pdf(pdf_id: str):
     """Get a processed PDF by ID"""
-    processed_file = os.path.join(PROCESSED_PDF_DIR, f"{pdf_id}.json")
+    output_path = os.path.join(PROCESSED_PDF_DIR, f"{pdf_id}.json")
 
-    if not os.path.exists(processed_file):
-        raise HTTPException(status_code=404, detail=f"PDF {pdf_id} not found")
+    if not os.path.exists(output_path):
+        raise HTTPException(status_code=404, detail="PDF not found")
 
     try:
-        data = load_json(processed_file)
-        return data
+        result = load_json(output_path)
+        return result
     except Exception as e:
-        logger.error(f"Error loading processed PDF: {str(e)}", exc_info=True)
+        logger.error(f"Error loading PDF data: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error loading PDF data: {str(e)}")
 
 
 @app.get("/pdf-mindmap-image/{pdf_id}")
 async def get_pdf_mindmap_image(pdf_id: str):
     """Get the mindmap image for a processed PDF"""
-    # Check if the SVG mindmap image exists
-    pdf_dir = os.path.join(Config.OUTPUT_DIR, pdf_id)
-    mindmap_svg_path = os.path.join(pdf_dir, f"{pdf_id}_mindmap.svg")
+    output_path = os.path.join(PROCESSED_PDF_DIR, f"{pdf_id}.json")
 
-    if os.path.exists(mindmap_svg_path):
-        return FileResponse(
-            mindmap_svg_path,
-            media_type="image/svg+xml",
-            filename=f"{pdf_id}_mindmap.svg",
-        )
-    else:
-        # Check if the markdown file exists and try to generate image
-        mindmap_md_path = os.path.join(pdf_dir, f"{pdf_id}_mindmap.md")
+    if not os.path.exists(output_path):
+        raise HTTPException(status_code=404, detail="PDF not found")
 
-        if os.path.exists(mindmap_md_path):
-            try:
-                # Generate image from the markdown file if mermaid is available
-                if not summarization_service._convert_mermaid_to_image:
-                    raise HTTPException(
-                        status_code=501,
-                        detail="mermaid-py is not available for image generation",
-                    )
+    try:
+        result = load_json(output_path)
 
-                with open(mindmap_md_path, "r") as f:
-                    mermaid_content = f.read()
+        if (
+            "outputs" in result
+            and "mindmap_image_path" in result["outputs"]
+            and "mindmap_image_type" in result["outputs"]
+        ):
+            image_path = result["outputs"]["mindmap_image_path"]
+            image_type = result["outputs"]["mindmap_image_type"]
 
-                image_path = summarization_service._convert_mermaid_to_image(
-                    mermaid_content, os.path.join(pdf_dir, f"{pdf_id}_mindmap")
+            if os.path.exists(image_path):
+                content_type = (
+                    "image/svg+xml" if image_type == "svg" else f"image/{image_type}"
                 )
 
-                if image_path and os.path.exists(image_path):
-                    return FileResponse(
-                        image_path,
-                        media_type="image/svg+xml",
-                        filename=f"{pdf_id}_mindmap.svg",
-                    )
-                else:
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Failed to generate mindmap image",
-                    )
-            except Exception as e:
-                logger.error(
-                    f"Error generating PDF mindmap image: {str(e)}", exc_info=True
+                return FileResponse(
+                    image_path,
+                    media_type=content_type,
+                    filename=f"{pdf_id}_mindmap.{image_type}",
                 )
+            else:
                 raise HTTPException(
-                    status_code=500, detail=f"Error generating mindmap image: {str(e)}"
+                    status_code=404, detail="Mindmap image file not found"
                 )
         else:
             raise HTTPException(
-                status_code=404, detail=f"Mindmap not found for PDF {pdf_id}"
+                status_code=404, detail="No mindmap image available for this PDF"
             )
+    except Exception as e:
+        logger.error(f"Error getting PDF mindmap image: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error getting PDF mindmap image: {str(e)}"
+        )
+
+
+@app.get("/all-pdfs")
+async def get_all_processed_pdfs():
+    """Get a list of all processed PDFs"""
+    try:
+        pdfs = []
+        for filename in os.listdir(PROCESSED_PDF_DIR):
+            if filename.endswith(".json"):
+                file_path = os.path.join(PROCESSED_PDF_DIR, filename)
+                try:
+                    data = load_json(file_path)
+                    pdfs.append(
+                        {
+                            "pdf_id": filename.replace(".json", ""),
+                            "title": data.get("title", "Untitled"),
+                            "num_pages": data.get("num_pages", 0),
+                            "processed_date": os.path.getmtime(file_path),
+                        }
+                    )
+                except Exception as e:
+                    logger.error(f"Error loading PDF data from {filename}: {str(e)}")
+                    continue
+
+        pdfs.sort(key=lambda x: x["processed_date"], reverse=True)
+
+        return {
+            "status": "success",
+            "count": len(pdfs),
+            "pdfs": pdfs,
+        }
+    except Exception as e:
+        logger.error(f"Error getting all PDFs: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error getting all PDFs: {str(e)}")
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    # Start the server
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

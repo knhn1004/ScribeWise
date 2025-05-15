@@ -15,7 +15,6 @@ def convert_json_to_anki(json_file, output_format="txt", deck_name=None):
     """Convert flashcards JSON to Anki-importable format"""
     print(f"Converting {json_file} to Anki format...")
 
-    # Read the JSON file
     with open(json_file, "r") as f:
         data = json.load(f)
 
@@ -23,10 +22,8 @@ def convert_json_to_anki(json_file, output_format="txt", deck_name=None):
         print("Error: Invalid flashcards JSON format (missing 'flashcards' key)")
         return False
 
-    # Get the base name for output
     base_name = os.path.splitext(json_file)[0]
 
-    # Determine output format
     if output_format.lower() == "apkg":
         try:
             import genanki
@@ -35,18 +32,15 @@ def convert_json_to_anki(json_file, output_format="txt", deck_name=None):
             print("    pip install genanki")
             return False
 
-        # Create an Anki package
         return create_anki_package(data["flashcards"], base_name, deck_name)
     elif output_format.lower() == "csv":
-        # CSV format
         output_file = f"{base_name}.csv"
         with open(output_file, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["front", "back"])  # Header
+            writer.writerow(["front", "back"])
             for card in data["flashcards"]:
                 writer.writerow([card["front"], card["back"]])
     else:
-        # Default: tab-delimited text format (most compatible with Anki)
         output_file = f"{base_name}.txt"
         with open(output_file, "w") as f:
             for card in data["flashcards"]:
@@ -67,7 +61,6 @@ def create_anki_package(flashcards, base_name, deck_name=None):
     """Create an Anki .apkg file using genanki"""
     import genanki
 
-    # Use base name for deck name if not provided
     if not deck_name:
         deck_name = (
             os.path.basename(base_name)
@@ -76,11 +69,9 @@ def create_anki_package(flashcards, base_name, deck_name=None):
             .title()
         )
 
-    # Generate a consistent model ID from the deck name
     model_id = int(hashlib.md5(deck_name.encode("utf-8")).hexdigest()[:8], 16)
-    deck_id = model_id + 1  # Just ensure it's different from model_id
+    deck_id = model_id + 1
 
-    # Create the model (note type)
     model = genanki.Model(
         model_id,
         "ScribeWise Basic",
@@ -97,15 +88,12 @@ def create_anki_package(flashcards, base_name, deck_name=None):
         ],
     )
 
-    # Create the deck
     deck = genanki.Deck(deck_id, deck_name)
 
-    # Add cards to the deck
     for card in flashcards:
         note = genanki.Note(model=model, fields=[card["front"], card["back"]])
         deck.add_note(note)
 
-    # Create the package and save it
     output_file = f"{base_name}.apkg"
     genanki.Package(deck).write_to_file(output_file)
 

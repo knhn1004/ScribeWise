@@ -12,10 +12,8 @@ from services.summarization_service import SummarizationService
 from utils.file_utils import save_json, load_json
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
-# Set up test directories
 OUTPUT_DIR = "test_outputs"
 DOWNLOAD_DIR = "test_downloads"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -26,11 +24,9 @@ async def run_complete_test(youtube_url: str):
     """Run a complete test of the ScribeWise workflow"""
     print(f"Starting complete test with URL: {youtube_url}")
 
-    # Create unique request ID for this test
     request_id = str(uuid.uuid4())
     print(f"Test request ID: {request_id}")
 
-    # Initialize services
     imaging_service = ImagingService(output_dir=DOWNLOAD_DIR)
     transcription_service = TranscriptionService(output_dir=DOWNLOAD_DIR)
     summarization_service = SummarizationService(output_dir=OUTPUT_DIR)
@@ -63,7 +59,6 @@ async def run_complete_test(youtube_url: str):
 
         outputs = await summarization_service.process_content(content_for_summarization)
 
-        # Check outputs
         print("\nGenerated outputs:")
         for output_type, output_path in outputs.items():
             if output_type != "error":
@@ -73,7 +68,6 @@ async def run_complete_test(youtube_url: str):
                     f"- {output_type}: {output_path} ({'✓' if file_exists else '✗'}, {file_size} bytes)"
                 )
 
-        # Save complete result
         result = {
             "video_info": video_result["video_info"],
             "transcription": transcription_result,
@@ -81,7 +75,6 @@ async def run_complete_test(youtube_url: str):
             "status": "success",
         }
 
-        # Convert URL to string to ensure serialization works
         if "url" in result["video_info"] and hasattr(
             result["video_info"]["url"], "__str__"
         ):
@@ -107,15 +100,11 @@ async def run_complete_test(youtube_url: str):
 if __name__ == "__main__":
     import sys
 
-    # Get URL from command line or use a default test URL
     if len(sys.argv) > 1:
         url = sys.argv[1]
     else:
-        # Default very short video for testing
-        url = "https://www.youtube.com/watch?v=jNQXAC9IVRw"  # "Me at the zoo" (first YouTube video)
+        url = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
 
-    # Run the test
     result = asyncio.run(run_complete_test(url))
 
-    # Exit with status code
     sys.exit(0 if result else 1)

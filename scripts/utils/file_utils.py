@@ -14,10 +14,8 @@ class PydanticJSONEncoder(json.JSONEncoder):
     """Custom JSON encoder that handles Pydantic types like HttpUrl"""
 
     def default(self, obj):
-        # Handle HttpUrl objects by converting them to strings
         if isinstance(obj, HttpUrl):
             return str(obj)
-        # Let the base class handle other types or raise TypeError
         return super().default(obj)
 
 
@@ -29,7 +27,6 @@ def ensure_directory(directory: str) -> str:
 
 def save_json(data: Dict[str, Any], filepath: str) -> str:
     """Save data as JSON file"""
-    # Create directory if it doesn't exist
     os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
 
     with open(filepath, "w", encoding="utf-8") as f:
@@ -51,7 +48,6 @@ def load_json(filepath: str) -> Dict[str, Any]:
 
 def save_text(text: str, filepath: str) -> str:
     """Save text to file"""
-    # Create directory if it doesn't exist
     os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
 
     with open(filepath, "w", encoding="utf-8") as f:
@@ -94,7 +90,6 @@ def cleanup_temp_files(directory: str, extensions: List[str] = None) -> None:
                 if file.endswith(ext):
                     os.remove(os.path.join(directory, file))
     else:
-        # Just remove the entire directory
         shutil.rmtree(directory)
 
 

@@ -231,39 +231,45 @@ class SummarizationService:
             # Use string parser first to get the raw output
             raw_chain = prompt_with_format | self.llm | StrOutputParser()
             raw_result = raw_chain.invoke({"text": text})
-            
+
             # Clean up the result before parsing as JSON
             # Remove any explanatory text before JSON
             import re
-            
+
             # Look for JSON object pattern
-            json_match = re.search(r'(\{\s*"flashcards"\s*:\s*\[.+\]\s*\})', raw_result, re.DOTALL)
+            json_match = re.search(
+                r'(\{\s*"flashcards"\s*:\s*\[.+\]\s*\})', raw_result, re.DOTALL
+            )
             if json_match:
                 # Extract just the JSON object
                 clean_result = json_match.group(1)
             else:
                 # Try cleaning common patterns
                 clean_result = raw_result
-                
+
                 # Remove markdown code blocks
-                clean_result = re.sub(r'```json\s*', '', clean_result)
-                clean_result = re.sub(r'```\s*', '', clean_result)
-                
+                clean_result = re.sub(r"```json\s*", "", clean_result)
+                clean_result = re.sub(r"```\s*", "", clean_result)
+
                 # Remove explanatory text before the JSON
-                clean_result = re.sub(r'^.*?(\{\s*"flashcards")', r'{\n  "flashcards"', 
-                                     clean_result, flags=re.DOTALL)
-                
+                clean_result = re.sub(
+                    r'^.*?(\{\s*"flashcards")',
+                    r'{\n  "flashcards"',
+                    clean_result,
+                    flags=re.DOTALL,
+                )
+
                 # Remove explanatory text after the JSON
-                clean_result = re.sub(r'(\}\s*)[\s\S]*$', r'}', clean_result)
-            
+                clean_result = re.sub(r"(\}\s*)[\s\S]*$", r"}", clean_result)
+
             # Ensure the result is valid JSON by checking if it starts with {
             clean_result = clean_result.strip()
-            if not clean_result.startswith('{'):
-                clean_result = '{' + clean_result.split('{', 1)[1]
-            
-            if not clean_result.endswith('}'):
-                clean_result = clean_result.rsplit('}', 1)[0] + '}'
-            
+            if not clean_result.startswith("{"):
+                clean_result = "{" + clean_result.split("{", 1)[1]
+
+            if not clean_result.endswith("}"):
+                clean_result = clean_result.rsplit("}", 1)[0] + "}"
+
             # Try to parse as JSON
             try:
                 parsed = json.loads(clean_result)
@@ -274,27 +280,28 @@ class SummarizationService:
             except json.JSONDecodeError as e:
                 print(f"Error parsing cleaned flashcards JSON: {str(e)}")
                 print(f"Cleaned content was: {clean_result[:100]}...")
-                
+
                 # Last resort - create a minimal valid JSON
                 fallback_json = {"flashcards": []}
-                
+
                 # Try to extract any valid flashcards using regex
                 front_matches = re.findall(r'"front":\s*"([^"]+)"', clean_result)
                 back_matches = re.findall(r'"back":\s*"([^"]+)"', clean_result)
-                
+
                 # Create cards from any matches
                 for i in range(min(len(front_matches), len(back_matches))):
-                    fallback_json["flashcards"].append({
-                        "front": front_matches[i], 
-                        "back": back_matches[i]
-                    })
-                
+                    fallback_json["flashcards"].append(
+                        {"front": front_matches[i], "back": back_matches[i]}
+                    )
+
                 if fallback_json["flashcards"]:
-                    print(f"Recovered {len(fallback_json['flashcards'])} flashcards using regex")
+                    print(
+                        f"Recovered {len(fallback_json['flashcards'])} flashcards using regex"
+                    )
                     return json.dumps(fallback_json, indent=2)
-                    
+
                 return raw_result  # Return raw result if all parsing fails
-                
+
         except Exception as e:
             error_msg = f"Error generating flashcards: {str(e)}"
             print(error_msg)
@@ -539,27 +546,27 @@ class SummarizationService:
 
     async def _generate_incremental_mindmap(self, chunks: List[str], title: str) -> str:
         """Generate a mindmap incrementally, chunk by chunk
-        
+
         Args:
             chunks: List of text chunks to process
             title: Title for the mindmap
-            
+
         Returns:
             Complete mindmap in mermaid format
         """
         if not chunks:
             return "```mermaid\nmindmap\n  root((Empty Document))\n```"
-            
+
         # Initialize with a base mindmap structure
         mindmap = f"""```mermaid
 mindmap
   root(({title}))
 ```"""
-        
+
         # Process each chunk incrementally
         for i, chunk in enumerate(chunks):
             print(f"Processing chunk {i+1}/{len(chunks)} for incremental mindmap")
-            
+
             try:
                 # Create a prompt for updating the mindmap
                 update_prompt = PromptTemplate.from_template(
@@ -584,36 +591,43 @@ mindmap
                     
                     UPDATED MINDMAP:"""
                 )
-                
+
                 # Use pipe syntax to generate updated mindmap
                 chain = update_prompt | self.llm | StrOutputParser()
-                result = chain.invoke({
-                    "current_mindmap": mindmap,
-                    "text_chunk": chunk,
-                    "chunk_num": i+1,
-                    "total_chunks": len(chunks)
-                })
-                
+                result = chain.invoke(
+                    {
+                        "current_mindmap": mindmap,
+                        "text_chunk": chunk,
+                        "chunk_num": i + 1,
+                        "total_chunks": len(chunks),
+                    }
+                )
+
                 # Clean the result to ensure it's a proper mindmap
                 if "```mermaid" in result:
                     # Extract content between mermaid code blocks
                     import re
-                    mermaid_content = re.search(r'```mermaid\s*(.*?)```', result, re.DOTALL)
+
+                    mermaid_content = re.search(
+                        r"```mermaid\s*(.*?)```", result, re.DOTALL
+                    )
                     if mermaid_content:
-                        cleaned_result = "```mermaid\n" + mermaid_content.group(1).strip() + "\n```"
+                        cleaned_result = (
+                            "```mermaid\n" + mermaid_content.group(1).strip() + "\n```"
+                        )
                         # Only update if we got valid content
                         mindmap = cleaned_result
                 else:
                     # If no code block markers but starts with mindmap
                     if "mindmap" in result:
                         mindmap = "```mermaid\n" + result.strip() + "\n```"
-                
+
             except Exception as e:
                 print(f"Error updating mindmap with chunk {i+1}: {str(e)}")
                 # Continue with the existing mindmap rather than failing completely
-        
+
         return mindmap
-        
+
     async def process_content_for_mindmap(self, content: Dict) -> Dict[str, Any]:
         """Process content to generate only a mindmap (optimized for full document)
 
@@ -632,7 +646,9 @@ mindmap
 
         # Check if we have valid text to process
         if not text or len(text.strip()) < 10:
-            return {"error": "No valid text content found in input or text is too short"}
+            return {
+                "error": "No valid text content found in input or text is too short"
+            }
 
         # Get title for the mindmap
         if "title" in content:
@@ -659,20 +675,22 @@ mindmap
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=10000,  # Smaller chunks for mindmap processing
             chunk_overlap=1000,
-            separators=["\n\n", "\n", ". ", " ", ""]
+            separators=["\n\n", "\n", ". ", " ", ""],
         )
         chunks = text_splitter.split_text(text)
-        
+
         if len(chunks) > 10:
             # Too many chunks, create summary chunks first
-            print(f"Document very large ({len(chunks)} chunks), creating summary chunks first")
+            print(
+                f"Document very large ({len(chunks)} chunks), creating summary chunks first"
+            )
             summary_chunks = []
-            
+
             # Process chunks in batches of 5 to create summary chunks
             for i in range(0, len(chunks), 5):
-                batch = chunks[i:i+5]
+                batch = chunks[i : i + 5]
                 combined_text = " ".join(batch)
-                
+
                 try:
                     summary_prompt = PromptTemplate.from_template(
                         """You are an expert summarizer. Create a concise summary of the following text, 
@@ -684,16 +702,20 @@ mindmap
                         
                         SUMMARY:"""
                     )
-                    
+
                     chain = summary_prompt | self.llm | StrOutputParser()
                     summary = chain.invoke({"text": combined_text})
                     summary_chunks.append(summary)
-                    print(f"Created summary chunk {len(summary_chunks)} from original chunks {i+1}-{min(i+5, len(chunks))}")
+                    print(
+                        f"Created summary chunk {len(summary_chunks)} from original chunks {i+1}-{min(i+5, len(chunks))}"
+                    )
                 except Exception as e:
-                    print(f"Error creating summary chunk: {str(e)}, using first part of original text")
+                    print(
+                        f"Error creating summary chunk: {str(e)}, using first part of original text"
+                    )
                     # Use the first part of the original text as a fallback
                     summary_chunks.append(combined_text[:5000])
-            
+
             # Use the summary chunks for mindmap generation
             chunks = summary_chunks
             print(f"Created {len(chunks)} summary chunks for mindmap generation")
@@ -704,11 +726,11 @@ mindmap
         except Exception as e:
             error_msg = f"Error generating mindmap: {str(e)}"
             print(error_msg)
-            
+
             # Write error message to file for debugging
             with open(mindmap_path, "w") as f:
                 f.write(error_msg)
-                
+
             return {"error": error_msg}
 
         # Save the mindmap
@@ -805,15 +827,15 @@ mindmap
         try:
             notes = self._generate_notes_direct(text)
             flashcards = self._generate_flashcards_direct(text)
-            
+
             # Use chunked mindmap generation for better reliability
             text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=10000,
                 chunk_overlap=1000,
-                separators=["\n\n", "\n", ". ", " ", ""]
+                separators=["\n\n", "\n", ". ", " ", ""],
             )
             chunks = text_splitter.split_text(text)
-            
+
             # Get title for the mindmap
             if "title" in content:
                 title = content["title"]
@@ -821,7 +843,7 @@ mindmap
                 title = f"Video {content['video_id']}"
             else:
                 title = "Video Content"
-                
+
             mindmap = await self._generate_incremental_mindmap(chunks, title)
         except Exception as e:
             error_msg = f"Error during content generation: {str(e)}"

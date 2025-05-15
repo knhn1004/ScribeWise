@@ -6,10 +6,8 @@ import os
 from dotenv import load_dotenv
 from typing import Dict, Any, Optional, List
 
-# Load environment variables from .env file
 load_dotenv()
 
-# Groq model configurations
 GROQ_TEXT_MODELS = {
     "llama3-70b-8192": {
         "name": "Llama 3 70B",
@@ -37,7 +35,6 @@ GROQ_TEXT_MODELS = {
     },
 }
 
-# Groq speech-to-text models
 GROQ_SPEECH_MODELS = {
     "whisper-large-v3": {
         "name": "Whisper Large V3",
@@ -65,7 +62,6 @@ GROQ_SPEECH_MODELS = {
     },
 }
 
-# Default models to use
 DEFAULT_TEXT_MODEL = "llama3-70b-8192"
 DEFAULT_SPEECH_MODEL = "whisper-large-v3-turbo"
 
@@ -73,30 +69,24 @@ DEFAULT_SPEECH_MODEL = "whisper-large-v3-turbo"
 class Config:
     """Configuration class for accessing environment variables with defaults"""
 
-    # API Keys
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-    # Directories
     OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./outputs")
     DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "./downloads")
 
-    # Service configuration
     DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
-    # Model configuration
     LLM_MODEL = os.getenv("LLM_MODEL", DEFAULT_TEXT_MODEL)
     STT_MODEL = os.getenv("STT_MODEL", DEFAULT_SPEECH_MODEL)
 
-    # Create required directories
     @classmethod
     def setup(cls):
         """Set up the environment, creating required directories"""
         os.makedirs(cls.OUTPUT_DIR, exist_ok=True)
         os.makedirs(cls.DOWNLOAD_DIR, exist_ok=True)
 
-        # Validate configured models
         if cls.LLM_MODEL not in GROQ_TEXT_MODELS:
             print(
                 f"Warning: LLM_MODEL {cls.LLM_MODEL} not found in available Groq text models. Using default: {DEFAULT_TEXT_MODEL}"
@@ -113,8 +103,8 @@ class Config:
     def get_dict(cls) -> Dict[str, Any]:
         """Return configuration as a dictionary"""
         return {
-            "GROQ_API_KEY": cls.GROQ_API_KEY is not None,  # Don't expose actual key
-            "OPENAI_API_KEY": cls.OPENAI_API_KEY is not None,  # Don't expose actual key
+            "GROQ_API_KEY": cls.GROQ_API_KEY is not None,
+            "OPENAI_API_KEY": cls.OPENAI_API_KEY is not None,
             "OUTPUT_DIR": cls.OUTPUT_DIR,
             "DOWNLOAD_DIR": cls.DOWNLOAD_DIR,
             "DEBUG": cls.DEBUG,

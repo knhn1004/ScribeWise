@@ -199,15 +199,10 @@ def main():
 
         save_transcript(transcript, file_to_transcribe)
 
-    except Exception as e:
-        logger.error(f"An error occurred: {str(e)}")
-        sys.exit(1)
     finally:
         if is_temp_file and file_to_transcribe and os.path.exists(file_to_transcribe):
-            try:
-                logger.info(f"Cleaned up temporary file: {file_to_transcribe}")
-            except Exception as e:
-                logger.error(f"Error cleaning up temporary file: {str(e)}")
+            os.remove(file_to_transcribe)
+            logger.info(f"Removed temporary file: {file_to_transcribe}")
 
 
 if __name__ == "__main__":

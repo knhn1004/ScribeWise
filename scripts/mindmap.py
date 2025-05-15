@@ -1,6 +1,5 @@
 from groq import Groq
 
-# the text to create the mindmap from
 with open("text.txt", "r") as file:
     text = file.read().strip()
 

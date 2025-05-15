@@ -31,7 +31,7 @@ class ProcessVideoRequest(BaseModel):
         description="Groq speech model to use for transcription. If not provided, the default from configuration will be used.",
     )
 
-    @field_validator('url')
+    @field_validator("url")
     @classmethod
     def url_must_be_supported(cls, v):
         """Validate that the URL is from a supported platform"""

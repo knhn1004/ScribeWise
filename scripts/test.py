@@ -9,10 +9,8 @@ import json
 import time
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
-# Set the API URL
 API_URL = "http://localhost:8000"
 
 
@@ -56,27 +54,22 @@ def check_status(request_id):
 
 def main():
     """Main test function"""
-    # Check if the API is running
     if not test_health():
         print("Health check failed. Is the API running?")
         sys.exit(1)
 
-    # Check command line arguments
     if len(sys.argv) < 2:
         print("Usage: python test.py <youtube_url>")
         sys.exit(1)
 
-    # Get the YouTube URL from command line
     youtube_url = sys.argv[1]
 
-    # Process the video
     request_id = process_video(youtube_url)
     if not request_id:
         print("Failed to start processing")
         sys.exit(1)
 
-    # Poll for status
-    max_attempts = 60  # 5 minutes max (5 seconds between checks)
+    max_attempts = 60
     attempts = 0
 
     while attempts < max_attempts:
@@ -92,7 +85,6 @@ def main():
         if status == "complete":
             print("Processing complete!")
 
-            # Print output paths
             if "result" in status_data and "outputs" in status_data["result"]:
                 outputs = status_data["result"]["outputs"]
                 print("\nGenerated outputs:")
@@ -106,7 +98,6 @@ def main():
             print(f"Error: {status_data.get('error', 'Unknown error')}")
             break
 
-        # Wait before checking again
         time.sleep(5)
         attempts += 1
 

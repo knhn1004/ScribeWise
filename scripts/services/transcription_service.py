@@ -16,13 +16,10 @@ import asyncio
 import base64
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
-# Groq API key
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Available Groq Whisper models
 WHISPER_MODELS = {
     "whisper-large-v3": {
         "name": "Whisper Large V3",
@@ -50,7 +47,6 @@ WHISPER_MODELS = {
     },
 }
 
-# Default model to use
 DEFAULT_WHISPER_MODEL = "whisper-large-v3-turbo"
 
 
@@ -70,7 +66,6 @@ class TranscriptionService:
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
 
-        # Set the model to use
         if model not in WHISPER_MODELS:
             print(
                 f"Warning: Model {model} not found in available Groq Whisper models. Using default: {DEFAULT_WHISPER_MODEL}"
@@ -84,7 +79,6 @@ class TranscriptionService:
         )
         print(f"Description: {WHISPER_MODELS[self.model]['description']}")
 
-        # Initialize Groq client if API key is available
         if GROQ_API_KEY:
             self.groq_client = groq.Client(api_key=GROQ_API_KEY)
             print(f"Successfully initialized Groq client for speech-to-text")
@@ -110,9 +104,7 @@ class TranscriptionService:
                 info = ydl.extract_info(url, download=False)
                 video_id = info["id"]
 
-                # Check if subtitles are available
                 if "subtitles" in info and "en" in info["subtitles"]:
-                    # Download subtitles
                     ydl_opts = {
                         "writesubtitles": True,
                         "subtitleslangs": ["en"],
@@ -124,7 +116,6 @@ class TranscriptionService:
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
                         ydl2.extract_info(url, download=True)
 
-                    # Find and read the subtitle file
                     subtitle_files = [
                         f
                         for f in os.listdir(self.output_dir)
@@ -132,13 +123,11 @@ class TranscriptionService:
                     ]
 
                     if subtitle_files:
-                        # Parse the VTT file
                         segments = self._parse_vtt(
                             f"{self.output_dir}/{subtitle_files[0]}"
                         )
                         return segments
 
-            # If we get here, no subtitles were found
             return None
 
         except Exception as e:
@@ -156,18 +145,14 @@ class TranscriptionService:
         while i < len(lines):
             line = lines[i].strip()
 
-            # Look for timestamp lines
             if "-->" in line:
-                # Extract timestamps
                 times = line.split("-->")
                 start_str = times[0].strip()
-                end_str = times[1].strip().split(" ")[0]  # Remove styling info
+                end_str = times[1].strip().split(" ")[0]
 
-                # Convert to seconds
                 start = self._timestamp_to_seconds(start_str)
                 end = self._timestamp_to_seconds(end_str)
 
-                # Get text (may span multiple lines)
                 text_lines = []
                 i += 1
                 while i < len(lines) and lines[i].strip() and not ("-->" in lines[i]):
@@ -176,7 +161,6 @@ class TranscriptionService:
 
                 text = " ".join(text_lines)
 
-                # Add segment
                 if text:
                     segments.append(
                         TranscriptionSegment(start=start, end=end, text=text)
@@ -224,11 +208,9 @@ class TranscriptionService:
 
     async def preprocess_audio(self, audio_path: str) -> str:
         """Optimize audio for transcription using ffmpeg (16kHz mono)"""
-        # Create a preprocessed version to optimize for speech recognition
         base_name = os.path.splitext(audio_path)[0]
         processed_path = f"{base_name}_processed.wav"
 
-        # Use ffmpeg to convert to 16kHz mono WAV (optimal for Whisper)
         cmd = f"ffmpeg -i {audio_path} -ar 16000 -ac 1 -c:a pcm_s16le {processed_path} -y -loglevel quiet"
         os.system(cmd)
 
@@ -241,40 +223,32 @@ class TranscriptionService:
 
     async def split_audio(self, audio_path: str, chunk_size_mb: int = 10) -> List[str]:
         """Split audio into chunks of specified size in MB"""
-        # Use ffmpeg to split file by size
         base_name = os.path.splitext(audio_path)[0]
         chunk_dir = f"{base_name}_chunks"
         os.makedirs(chunk_dir, exist_ok=True)
 
-        # Get file size in bytes
         file_size = os.path.getsize(audio_path)
 
-        # Calculate number of chunks
         chunk_size_bytes = chunk_size_mb * 1024 * 1024
         num_chunks = max(
             1,
             file_size // chunk_size_bytes + (1 if file_size % chunk_size_bytes else 0),
         )
 
-        # Get audio duration
         duration_cmd = f"ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {audio_path}"
         duration_result = os.popen(duration_cmd).read().strip()
         duration = float(duration_result)
 
-        # Calculate chunk duration
         chunk_duration = duration / num_chunks
 
-        # Split audio
         chunk_files = []
         for i in range(num_chunks):
             start_time = i * chunk_duration
-            chunk_file = f"{chunk_dir}/chunk_{i}.wav"  # Using WAV for best compatibility with Whisper
+            chunk_file = f"{chunk_dir}/chunk_{i}.wav"
 
             if i < num_chunks - 1:
-                # Not the last chunk
                 cmd = f"ffmpeg -i {audio_path} -ss {start_time} -t {chunk_duration} -ar 16000 -ac 1 -c:a pcm_s16le {chunk_file} -y -loglevel quiet"
             else:
-                # Last chunk (to handle any rounding issues)
                 cmd = f"ffmpeg -i {audio_path} -ss {start_time} -ar 16000 -ac 1 -c:a pcm_s16le {chunk_file} -y -loglevel quiet"
 
             os.system(cmd)
@@ -293,25 +267,21 @@ class TranscriptionService:
         if not self.groq_client:
             raise Exception("Groq API client not initialized (missing GROQ_API_KEY)")
 
-        # Call Groq Whisper API
         try:
-            # Open the file in binary mode to get file object or bytes
             with open(audio_path, "rb") as audio_file:
                 request_params = {
-                    "file": audio_file,  # Pass the file object directly
+                    "file": audio_file,
                     "model": self.model,
                     "response_format": response_format,
-                    "temperature": 0,  # Recommended setting for transcription
+                    "temperature": 0,
                 }
 
-                # Add optional parameters if provided
                 if language:
                     request_params["language"] = language
 
                 if response_format == "verbose_json" and timestamp_granularities:
                     request_params["timestamp_granularities"] = timestamp_granularities
 
-                # Make the API call
                 print(
                     f"Transcribing with Groq: {os.path.basename(audio_path)} using model {self.model}"
                 )
@@ -319,29 +289,22 @@ class TranscriptionService:
                     **request_params
                 )
 
-            # Assume response contains segments
-            segments = []
+                segments = []
 
-            # Handle different response formats
             if response_format == "text":
-                # If response is just text, create a single segment
                 segments.append(
                     TranscriptionSegment(
                         start=0.0,
-                        end=0.0,  # We don't know the end time
+                        end=0.0,
                         text=response.text,
                     )
                 )
             elif response_format in ["json", "verbose_json"]:
-                # Extract segments from JSON response
                 if hasattr(response, "segments"):
-                    # Response is an object with segments attribute
                     response_segments = response.segments
                 elif isinstance(response, dict) and "segments" in response:
-                    # Response is a dictionary with segments key
                     response_segments = response["segments"]
                 else:
-                    # No segments found, use full text
                     text = (
                         response.text
                         if hasattr(response, "text")
@@ -350,16 +313,12 @@ class TranscriptionService:
                     segments.append(TranscriptionSegment(start=0.0, end=0.0, text=text))
                     return segments
 
-                # Process segments
                 for seg in response_segments:
-                    # Handle both object.attribute and dict["key"] access
                     if isinstance(seg, dict):
-                        # Dictionary access
                         start = seg.get("start", 0.0)
                         end = seg.get("end", 0.0)
                         text = seg.get("text", "")
                     else:
-                        # Object attribute access
                         start = getattr(seg, "start", 0.0)
                         end = getattr(seg, "end", 0.0)
                         text = getattr(seg, "text", "")
@@ -377,19 +336,15 @@ class TranscriptionService:
         self, audio_path: str, language: str = None
     ) -> List[TranscriptionSegment]:
         """Split audio and transcribe all chunks"""
-        # First preprocess the audio to optimize for transcription
         processed_audio = await self.preprocess_audio(audio_path)
 
-        # Split audio into chunks
         chunk_files = await self.split_audio(processed_audio)
 
-        # Transcribe each chunk
         all_segments = []
         time_offset = 0.0
 
         for chunk_file in chunk_files:
             try:
-                # Transcribe chunk
                 segments = await self.transcribe_audio_chunk(
                     audio_path=chunk_file,
                     language=language,
@@ -397,21 +352,17 @@ class TranscriptionService:
                     timestamp_granularities=[
                         "segment",
                         "word",
-                    ],  # Get both segment and word-level timestamps
+                    ],
                 )
 
-                # Adjust timestamps and add to result
                 for segment in segments:
                     segment.start += time_offset
                     segment.end += time_offset
                     all_segments.append(segment)
 
-                # Update time offset for next chunk
-                # This is approximate - in a real implementation, you'd need to get the exact duration
                 if segments and segments[-1].end > 0:
                     time_offset = segments[-1].end
                 else:
-                    # Estimate chunk duration using ffmpeg
                     duration_cmd = f"ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {chunk_file}"
                     duration_result = os.popen(duration_cmd).read().strip()
                     chunk_duration = float(duration_result)
@@ -424,11 +375,9 @@ class TranscriptionService:
 
     async def process_video(self, url: str, language: str = None) -> Dict:
         """Complete process of getting or generating transcription"""
-        # First, try to extract subtitles
         subtitles = await self.extract_subtitles(url)
 
         if subtitles:
-            # We have subtitles, use them
             print(f"Using available subtitles for video")
             return {
                 "source": "subtitles",
@@ -437,7 +386,6 @@ class TranscriptionService:
                 "model": "subtitles",
             }
         else:
-            # No subtitles, download audio and transcribe
             print(
                 f"No subtitles found, transcribing audio using Groq Whisper: {self.model}"
             )
